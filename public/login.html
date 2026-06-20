@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>登录 - 研密通</title>
+    <link rel="stylesheet" href="/css/style.css">
+</head>
+<body class="auth-page">
+    <div class="auth-card">
+        <div class="auth-brand">
+            <div class="auth-brand-title">研密通</div>
+            <div class="auth-brand-subtitle">科研数据可信共享与审计平台</div>
+        </div>
+
+        <form id="login-form">
+            <div class="form-group">
+                <label class="form-label" for="username">用户名</label>
+                <input class="input" type="text" id="username" name="username" required autocomplete="username" autofocus>
+            </div>
+            <div class="form-group">
+                <label class="form-label" for="password">密码</label>
+                <input class="input" type="password" id="password" name="password" required autocomplete="current-password">
+            </div>
+            <button type="submit" class="btn btn-primary btn-block" id="submit-btn">登 录</button>
+        </form>
+
+        <div class="auth-footer">
+            还没有账号？<a href="/register.html">立即注册</a>
+        </div>
+    </div>
+
+    <script src="/js/auth.js"></script>
+    <script src="/js/api.js"></script>
+    <script src="/js/ui.js"></script>
+    <script>
+        if (getToken()) {
+            window.location.href = '/';
+        }
+
+        document.getElementById('login-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const btn = document.getElementById('submit-btn');
+            const username = document.getElementById('username').value.trim();
+            const password = document.getElementById('password').value;
+            if (!username || !password) return;
+            btn.disabled = true;
+            btn.textContent = '登录中…';
+            try {
+                const data = await apiPost('/auth/login', { username, password });
+                saveSession(data);
+                toast('登录成功', 'success');
+                setTimeout(() => window.location.href = '/', 300);
+            } catch (err) {
+                toast(err.message || '登录失败', 'error');
+                btn.disabled = false;
+                btn.textContent = '登 录';
+            }
+        });
+    </script>
+</body>
+</html>

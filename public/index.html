@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>研密通 - 科研数据可信共享平台</title>
+    <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+    <!-- 侧边栏切换按钮（汉堡，仅在侧边栏关闭时显示） -->
+    <button class="sidebar-toggle" id="sidebar-toggle" aria-label="打开菜单">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="4" y1="7" x2="20" y2="7"/>
+            <line x1="4" y1="12" x2="20" y2="12"/>
+            <line x1="4" y1="17" x2="20" y2="17"/>
+        </svg>
+    </button>
+
+    <!-- 移动端遮罩 -->
+    <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
+
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <div class="sidebar-logo">
+                研密通
+                <span class="subtitle">科研数据可信共享</span>
+            </div>
+            <button class="sidebar-close" id="sidebar-close" aria-label="关闭菜单">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="6" y1="6" x2="18" y2="18"/>
+                    <line x1="18" y1="6" x2="6" y2="18"/>
+                </svg>
+            </button>
+        </div>
+
+        <nav class="sidebar-nav">
+            <a href="#/projects" data-nav>
+                <span class="nav-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/>
+                    </svg>
+                </span>
+                <span>项目管理</span>
+            </a>
+            <a href="#/forensics" data-nav>
+                <span class="nav-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="11" cy="11" r="6"/>
+                        <line x1="15.5" y1="15.5" x2="20" y2="20"/>
+                    </svg>
+                </span>
+                <span>泄露取证</span>
+            </a>
+            <a href="#/profile" data-nav>
+                <span class="nav-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="8" r="3.5"/>
+                        <path d="M5 20c0-3.5 3-6 7-6s7 2.5 7 6"/>
+                    </svg>
+                </span>
+                <span>用户信息</span>
+            </a>
+            <a href="#/about" data-nav>
+                <span class="nav-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="9"/>
+                        <line x1="12" y1="11" x2="12" y2="16.5"/>
+                        <circle cx="12" cy="7.8" r="0.6" fill="currentColor"/>
+                    </svg>
+                </span>
+                <span>关于</span>
+            </a>
+        </nav>
+
+        <div class="sidebar-footer">
+            <div class="sidebar-user">
+                <span class="sidebar-user-label">用户名：</span><span id="user-name">—</span>
+            </div>
+            <button class="sidebar-logout" id="logout-btn">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" width="14" height="14">
+                    <path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3"/>
+                    <polyline points="10 16 14 12 10 8"/>
+                    <line x1="14" y1="12" x2="4" y2="12"/>
+                </svg>
+                <span>退出登录</span>
+            </button>
+        </div>
+    </aside>
+
+    <main class="main-content" id="main-content">
+        <div class="loading"><div class="spinner"></div></div>
+    </main>
+
+    <script src="/js/auth.js"></script>
+    <script src="/js/api.js"></script>
+    <script src="/js/ui.js"></script>
+    <script>
+        if (!getToken()) {
+            window.location.href = '/login.html';
+        } else {
+            document.getElementById('user-name').textContent = getUsername() || '—';
+            document.getElementById('logout-btn').addEventListener('click', async () => {
+                if (await confirmDialog('退出登录', '确认要退出当前账号吗？', { okText: '退出', dangerous: true })) {
+                    logout();
+                }
+            });
+
+            // ===== 侧边栏开关：桌面端默认开，移动端默认关 =====
+            const MOBILE_BREAKPOINT = 768;
+            const isMobile = () => window.innerWidth <= MOBILE_BREAKPOINT;
+            const setOpen = (open) => document.body.classList.toggle('sidebar-open', open);
+            const isOpen = () => document.body.classList.contains('sidebar-open');
+
+            // 初始状态
+            setOpen(!isMobile());
+
+            document.getElementById('sidebar-toggle').addEventListener('click', () => setOpen(true));
+            document.getElementById('sidebar-close').addEventListener('click', () => setOpen(false));
+            document.getElementById('sidebar-backdrop').addEventListener('click', () => setOpen(false));
+
+            // 移动端：点击导航后自动收起
+            document.getElementById('sidebar').addEventListener('click', (e) => {
+                if (isMobile() && e.target.closest('a[data-nav]')) {
+                    setOpen(false);
+                }
+            });
+
+            // 窗口尺寸跨越断点时重置默认状态
+            let lastIsMobile = isMobile();
+            window.addEventListener('resize', () => {
+                const nowMobile = isMobile();
+                if (nowMobile !== lastIsMobile) {
+                    setOpen(!nowMobile);
+                    lastIsMobile = nowMobile;
+                }
+            });
+        }
+    </script>
+    <script src="/js/projects.js"></script>
+    <script src="/js/project-detail.js"></script>
+    <script src="/js/user-profile.js"></script>
+    <script src="/js/forensics.js"></script>
+    <script src="/js/about.js"></script>
+    <script src="/js/router.js"></script>
+</body>
+</html>
