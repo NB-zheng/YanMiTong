@@ -1,0 +1,17 @@
+services:
+  yantong:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: yantong:latest
+    container_name: yantong
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - TZ=Asia/Shanghai
+    volumes:
+      # 前端静态文件：bind mount 可不重建镜像更新前端
+      - ./public:/app/public
+      # 数据库 + 加密文件：必须持久化，容器删除/重建后数据不丢
+      - ./backend/data:/app/backend/data

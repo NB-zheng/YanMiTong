@@ -1,0 +1,22 @@
+# Python
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/.venv
+**/venv
+
+# 运行期产物（容器内由 volume 提供）
+backend/data
+
+# 开发工具与文档
+.git
+.gitignore
+.idea
+.vscode
+*.md
+public.zip
+
+# Docker 自身
+Dockerfile
+docker-compose.yml
+.dockerignore
