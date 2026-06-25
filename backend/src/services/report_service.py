@@ -10,8 +10,8 @@ from typing import Optional
 from tools import bj_str
 
 
-def render_forensics_pdf(result: dict) -> tuple[bytes, str]:
-    """返回 (bytes, content_type)。"""
+def render_forensics_pdf(result: dict, filename: str | None = None) -> tuple[bytes, str]:
+    """返回 (bytes, content_type)。filename 为送检的疑似泄露文件名。"""
     try:
         from reportlab.lib.pagesizes import A4
         from reportlab.pdfgen import canvas
@@ -41,17 +41,26 @@ def render_forensics_pdf(result: dict) -> tuple[bytes, str]:
         y -= 30
         c.setFont(font_name, 11)
         c.drawString(50, y, f"生成时间：{bj_str()}")
+        y -= 20
+        c.drawString(50, y, f"取证文件：{filename or '-'}")
         y -= 24
 
-        lines = [
-            f"匹配结果：{'已定位到下载者' if result.get('matched') else '未匹配'}",
-            f"提取的指纹：{result.get('fingerprint') or '-'}",
-            f"责任用户：{result.get('username') or '-'} (user_id={result.get('user_id')})",
-            f"关联文件：file_id={result.get('file_id') or '-'}",
-            f"下载时间：{result.get('download_time') or '-'}",
-            f"水印类型：{result.get('watermark_type') or '-'}",
-            f"说明：{result.get('message') or ''}",
-        ]
+        if result.get("matched"):
+            status_text = "已定位到下载者"
+        elif result.get("cross_project"):
+            status_text = "命中但属于其它项目（无权查看下载者）"
+        else:
+            status_text = "未匹配"
+
+        lines = [f"匹配结果：{status_text}"]
+        if result.get("matched"):
+            lines += [
+                f"下载用户：{result.get('username') or '-'}",
+                f"下载时间：{result.get('download_time') or '-'}",
+            ]
+        if result.get("message"):
+            lines.append(f"说明：{result['message']}")
+
         for line in lines:
             c.drawString(50, y, line)
             y -= 20
@@ -60,8 +69,16 @@ def render_forensics_pdf(result: dict) -> tuple[bytes, str]:
         c.save()
         return bio.getvalue(), "application/pdf"
     except ImportError:
-        # 降级为文本
-        text = "研密通 · 泄露取证报告\n" + bj_str() + "\n\n"
-        for k, v in result.items():
-            text += f"{k}: {v}\n"
-        return text.encode("utf-8"), "text/plain; charset=utf-8"
+        # 降级为文本（同样不暴露指纹/水印类型等内部细节）
+        lines = ["研密通 · 泄露取证报告", bj_str(), f"取证文件：{filename or '-'}", ""]
+        if result.get("matched"):
+            lines += ["匹配结果：已定位到下载者",
+                      f"下载用户：{result.get('username') or '-'}",
+                      f"下载时间：{result.get('download_time') or '-'}"]
+        elif result.get("cross_project"):
+            lines.append("匹配结果：命中但属于其它项目（无权查看下载者）")
+        else:
+            lines.append("匹配结果：未匹配")
+        if result.get("message"):
+            lines.append(f"说明：{result['message']}")
+        return ("\n".join(lines) + "\n").encode("utf-8"), "text/plain; charset=utf-8"

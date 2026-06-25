@@ -77,28 +77,3 @@ def download(file_id: int, request: Request,
     return Response(content=body, headers=headers, media_type="application/octet-stream")
 
 
-@router.post("/forensics", response_model=schemas.ForensicsResp,
-             summary="上传泄露文件 → 提取指纹 → 匹配下载用户")
-async def forensics(file: UploadFile = File(...),
-                    _me: User = Depends(auth_service.current_user),
-                    db: Session = Depends(get_db)):
-    data = await file.read()
-    result = file_service.forensics_analyze(db, data)
-    return schemas.ForensicsResp(**result)
-
-
-@router.post("/forensics/report",
-             summary="上传泄露文件并直接下载 PDF 取证报告")
-async def forensics_report(file: UploadFile = File(...),
-                           _me: User = Depends(auth_service.current_user),
-                           db: Session = Depends(get_db)):
-    from services import report_service
-    data = await file.read()
-    result = file_service.forensics_analyze(db, data)
-    if result.get("download_time"):
-        from tools import bj_str
-        result["download_time"] = bj_str(result["download_time"])
-    body, ctype = report_service.render_forensics_pdf(result)
-    suffix = "pdf" if ctype == "application/pdf" else "txt"
-    return Response(content=body, media_type=ctype,
-                    headers={"Content-Disposition": _content_disposition(f"forensics_report.{suffix}")})

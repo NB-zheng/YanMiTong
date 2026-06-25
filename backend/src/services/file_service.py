@@ -285,45 +285,147 @@ def _apply_watermark(file_type: str, data: bytes, fingerprint: str) -> tuple[byt
 
 
 # ===== 取证 =====
-def forensics_analyze(db: Session, leaked_bytes: bytes, hint_file_id: Optional[int] = None) -> dict:
-    """从泄露文件中提取指纹并匹配 WatermarkRecord。
+def forensics_analyze(db: Session, requester: User, leaked_bytes: bytes,
+                      project_id: int) -> dict:
+    """从泄露文件中提取指纹并匹配 WatermarkRecord，必须项目内取证。
 
-    简单方案：扫描 trailer / metadata 中的指纹串，再到库里精确匹配。
+    安全约束：只回显本项目内文件的下载者；如果指纹属于其它项目的文件，
+    返回 cross_project=True 但不暴露任何下载者信息。
     """
     fp = _extract_fingerprint(leaked_bytes)
     if not fp:
-        return {"matched": False, "message": "未能提取到指纹"}
+        return {"matched": False, "message": "未能从该文件中提取到指纹（可能未经平台下载或水印已被破坏）"}
 
     wr = db.query(WatermarkRecord).filter_by(fingerprint=fp).first()
     if not wr:
-        return {"matched": False, "fingerprint": fp, "message": "指纹未在下载记录中匹配到"}
+        return {"matched": False, "message": "提取到的指纹未在平台下载记录中匹配到"}
+
+    fm = db.query(FileMeta).get(wr.file_id)
+    if not fm:
+        # 文件元数据已被清掉，无法验证归属，按"无法判定"处理避免泄漏
+        return {"matched": False, "message": "对应文件已被删除，无法确认归属"}
+
+    if fm.project_id != project_id:
+        # 该文件不属于当前项目：明确拒绝披露下载者
+        audit.write_log(db, project_id=project_id, user_id=requester.user_id,
+                        operation="forensics", result="denied",
+                        object_type="file", object_id=str(wr.file_id),
+                        detail={"reason": "cross_project",
+                                "actual_project_id": fm.project_id})
+        return {
+            "matched": False,
+            "cross_project": True,
+            "message": "该文件不属于当前项目，您无权查看其下载人信息",
+        }
 
     user = db.query(User).get(wr.user_id)
-    fm = db.query(FileMeta).get(wr.file_id)
-    if fm:
-        audit.write_log(db, project_id=fm.project_id, user_id=wr.user_id,
-                        operation="forensics", result="success",
-                        object_type="file", object_id=str(wr.file_id),
-                        detail={"fingerprint": fp})
+    audit.write_log(db, project_id=project_id, user_id=requester.user_id,
+                    operation="forensics", result="success",
+                    object_type="file", object_id=str(wr.file_id),
+                    detail={"target_user": user.username if user else None})
     return {
         "matched": True,
-        "fingerprint": fp,
-        "username": user.username if user else None,
-        "file_id": wr.file_id,
+        "username": user.username if user else "(用户已删除)",
         "download_time": wr.download_time,
-        "watermark_type": wr.watermark_type,
         "message": f"定位到下载者：{user.username if user else '(用户已删除)'}",
     }
 
 
+# ===== 指纹提取：分格式实现 =====
 def _extract_fingerprint(data: bytes) -> Optional[str]:
-    """通用提取：先看 trailer，再交给具体 marker（演示版做简版）。"""
+    """按优先级尝试多种提取方式，首个命中即返回。
+
+    1. 显式的文本 trailer（任何文本/二进制文件的兜底标记）
+    2. PDF 元数据（PyMuPDF）
+    3. DOCX 文档属性（python-docx）
+    4. 图像 LSB（Pillow）
+    """
     import re
-    m = re.search(rb"YMT-FP:([0-9a-f]{64})", data)
-    if m:
-        return m.group(1).decode("ascii")
-    # PDF 元数据
-    m = re.search(rb"/YMTFingerprint\s*\(([0-9a-f]{64})\)", data)
-    if m:
-        return m.group(1).decode("ascii")
+    # 1. trailer / 显式标记（兼容历史 trailer_tag）
+    for pat in (rb"YMT-FP:([0-9a-f]{64})", rb"YMTFingerprint\(([0-9a-f]{64})\)"):
+        m = re.search(pat, data)
+        if m:
+            return m.group(1).decode("ascii")
+    # 2/3/4 顺序尝试，失败静默
+    for extractor in (_extract_from_pdf, _extract_from_docx, _extract_from_image_lsb):
+        fp = extractor(data)
+        if fp:
+            return fp
+    return None
+
+
+def _extract_from_pdf(data: bytes) -> Optional[str]:
+    import re
+    try:
+        import fitz
+        doc = fitz.open(stream=data, filetype="pdf")
+        try:
+            meta = doc.metadata or {}
+            for key in ("keywords", "subject", "title", "author"):
+                v = meta.get(key) or ""
+                m = re.search(r"YMT(?:Fingerprint\(|-FP:)([0-9a-f]{64})", v)
+                if m:
+                    return m.group(1)
+        finally:
+            doc.close()
+    except Exception:
+        pass
+    return None
+
+
+def _extract_from_docx(data: bytes) -> Optional[str]:
+    import re, io
+    try:
+        from docx import Document
+        doc = Document(io.BytesIO(data))
+        cp = doc.core_properties
+        for v in (cp.keywords or "", cp.comments or "", cp.subject or ""):
+            m = re.search(r"YMT(?:Fingerprint\(|-FP:)([0-9a-f]{64})", v)
+            if m:
+                return m.group(1)
+        # 也扫描所有段落文本，捕获白色 1pt 隐藏段落
+        for p in doc.paragraphs:
+            m = re.search(r"YMT(?:Fingerprint\(|-FP:)([0-9a-f]{64})", p.text or "")
+            if m:
+                return m.group(1)
+    except Exception:
+        pass
+    return None
+
+
+def _extract_from_image_lsb(data: bytes) -> Optional[str]:
+    """从图像 R 通道最低位重组出 64 位 hex 指纹（与 image_marker.embed 对应）。"""
+    import re, io
+    try:
+        from PIL import Image
+        img = Image.open(io.BytesIO(data)).convert("RGBA")
+        pixels = img.load()
+        w, h = img.size
+        # 指纹 = 64 字符 hex（UTF-8 / ASCII 各 1 字节）+ 8 bit 终止符 = 520 bits
+        target_bits = 65 * 8
+        bits = []
+        for y in range(h):
+            for x in range(w):
+                bits.append(pixels[x, y][0] & 1)
+                if len(bits) >= target_bits:
+                    break
+            if len(bits) >= target_bits:
+                break
+        if len(bits) < target_bits:
+            return None
+        # 还原字节并以终止符 0x00 截断
+        out = bytearray()
+        for i in range(0, len(bits), 8):
+            b = 0
+            for j in range(8):
+                b = (b << 1) | bits[i + j]
+            if b == 0:
+                break
+            out.append(b)
+        text = out.decode("ascii", errors="ignore")
+        m = re.match(r"^([0-9a-f]{64})", text)
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
     return None

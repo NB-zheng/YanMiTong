@@ -1,12 +1,26 @@
 """项目管理路由。"""
 import os
-from fastapi import APIRouter, Depends, HTTPException
+from urllib.parse import quote
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from database import get_db, Project, ProjectMember, User, FileMeta, Authorization, Alert
-from services import auth_service, audit_service, authz_service
+from services import auth_service, audit_service, file_service
 from services.serializers import project_out, projects_out, member_out, members_out
 import schemas
+
+
+def _content_disposition(filename: str) -> str:
+    ascii_fallback = filename.encode("ascii", "ignore").decode("ascii") or "download"
+    return f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{quote(filename)}"
+
+
+def _assert_project_member(db: Session, user_id: int, project_id: int) -> None:
+    pm = db.query(ProjectMember).filter_by(
+        project_id=project_id, user_id=user_id, status="active").first()
+    if not pm:
+        raise HTTPException(403, "您不是该项目的成员，无法执行此操作")
 
 router = APIRouter(prefix="/api/project", tags=["project"])
 
@@ -169,9 +183,8 @@ def add_member(project_id: int, req: schemas.AddMemberReq,
 
 @router.delete("/{project_id}/members/{username}", response_model=schemas.OkResp)
 def remove_member(project_id: int, username: str,
-                  sess: dict = Depends(auth_service.current_session),
+                  me: User = Depends(auth_service.current_user),
                   db: Session = Depends(get_db)):
-    me = db.query(User).get(sess["user_id"])
     p = db.query(Project).get(project_id)
     if not p:
         raise HTTPException(404, "项目不存在")
@@ -186,21 +199,16 @@ def remove_member(project_id: int, username: str,
     if not m:
         raise HTTPException(404, "成员不存在")
 
-    # 先做强撤销：把该成员在本项目所有文件上的有效授权全部走重加密链路
-    stats = authz_service.revoke_for_member_removal(
-        db, me, sess["sm2_private_key_hex"], target.user_id, project_id,
-    )
-
-    # 再标记成员为 removed
+    # 仅项目层操作：把成员标记为 removed。
+    # 文件授权与成员关系正交：要切断对具体文件的访问，请在「文件授权」Tab 撤销对应 auth。
     m.status = "removed"
     db.commit()
 
     audit_service.write_log(db, project_id=project_id, user_id=me.user_id,
                             operation="remove_member", result="success",
                             object_type="member", object_id=target.username,
-                            detail={"target": target.username, "revoke_stats": stats})
-    msg = f"成员已移除（强撤销 {stats['rekeyed']} 个授权，降级标记 {stats['mark_only']} 个）"
-    return schemas.OkResp(message=msg)
+                            detail={"target": target.username})
+    return schemas.OkResp(message="成员已移除（已有文件授权不会自动撤销，如需收回请在「文件授权」中操作）")
 
 
 @router.get("/{project_id}/members", response_model=list[schemas.ProjectMemberOut])
@@ -209,3 +217,66 @@ def list_members(project_id: int, db: Session = Depends(get_db),
     # 仅返回 active 成员；removed 成员仅作为审计历史保留在 DB 中
     rows = db.query(ProjectMember).filter_by(project_id=project_id, status="active").all()
     return members_out(db, rows)
+
+
+@router.post("/{project_id}/leave", response_model=schemas.OkResp,
+             summary="主动退出项目（非 owner）；仅项目成员关系生效，不影响已有文件授权")
+def leave_project(project_id: int,
+                  me: User = Depends(auth_service.current_user),
+                  db: Session = Depends(get_db)):
+    p = db.query(Project).get(project_id)
+    if not p:
+        raise HTTPException(404, "项目不存在")
+    if p.owner_id == me.user_id:
+        raise HTTPException(400, "负责人不能退出自己创建的项目，请直接转让所有权或删除项目")
+    m = db.query(ProjectMember).filter_by(
+        project_id=project_id, user_id=me.user_id, status="active").first()
+    if not m:
+        raise HTTPException(404, "您不是该项目的成员")
+
+    # 仅项目层操作：成员关系作废。
+    # 文件授权独立维护：用户先前获得的具体文件授权仍然有效，
+    # 直到对应授权者主动 revoke。这与"移除成员"的行为一致。
+    m.status = "removed"
+    db.commit()
+
+    audit_service.write_log(db, project_id=project_id, user_id=me.user_id,
+                            operation="leave_project", result="success",
+                            object_type="member", object_id=me.username,
+                            detail={"target": me.username})
+    return schemas.OkResp(message="已退出项目（已有文件授权不变；如不想再访问任何文件请联系负责人撤销授权）")
+
+
+# ===== 项目级泄露取证（仅审计员） =====
+@router.post("/{project_id}/forensics", response_model=schemas.ForensicsResp,
+             summary="项目内取证：仅审计员可执行；跨项目命中不暴露下载者")
+async def forensics(project_id: int,
+                    file: UploadFile = File(...),
+                    me: User = Depends(auth_service.current_user),
+                    db: Session = Depends(get_db)):
+    audit_service.assert_can_audit(db, me.user_id, project_id)
+    data = await file.read()
+    result = file_service.forensics_analyze(db, me, data, project_id)
+    return schemas.ForensicsResp(**result)
+
+
+@router.post("/{project_id}/forensics/report",
+             summary="项目内取证 PDF 报告（仅审计员）")
+async def forensics_report(project_id: int,
+                           file: UploadFile = File(...),
+                           me: User = Depends(auth_service.current_user),
+                           db: Session = Depends(get_db)):
+    audit_service.assert_can_audit(db, me.user_id, project_id)
+    from services import report_service
+    data = await file.read()
+    result = file_service.forensics_analyze(db, me, data, project_id)
+    if result.get("download_time"):
+        from tools import bj_str
+        result["download_time"] = bj_str(result["download_time"])
+    src_name = file.filename or ""
+    body, ctype = report_service.render_forensics_pdf(result, filename=src_name)
+    suffix = "pdf" if ctype == "application/pdf" else "txt"
+    prefix = os.path.splitext(os.path.basename(src_name))[0] or "forensics"
+    report_name = f"取证报告_{prefix}.{suffix}"
+    return Response(content=body, media_type=ctype,
+                    headers={"Content-Disposition": _content_disposition(report_name)})

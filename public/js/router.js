@@ -2,7 +2,6 @@
 
 const ROUTES = [
     { path: '#/projects',  render: 'renderProjects' },
-    { path: '#/forensics', render: 'renderForensics' },
     { path: '#/profile',   render: 'renderProfile' },
     { path: '#/about',     render: 'renderAbout' },
 ];

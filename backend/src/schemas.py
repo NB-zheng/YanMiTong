@@ -146,12 +146,10 @@ class ChainVerifyResp(BaseModel):
 
 # ===== Forensics =====
 class ForensicsResp(BaseModel):
-    matched: bool
-    fingerprint: Optional[str] = None
-    username: Optional[str] = None
-    file_id: Optional[int] = None
-    download_time: Optional[datetime.datetime] = None
-    watermark_type: Optional[str] = None
+    matched: bool                                       # 命中且属于本项目
+    cross_project: bool = False                         # 命中但属于其它项目（无权查看）
+    username: Optional[str] = None                      # 仅在 matched=true 时返回
+    download_time: Optional[datetime.datetime] = None   # 仅在 matched=true 时返回
     message: str
 
 

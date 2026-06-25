@@ -1,11 +1,12 @@
 // 项目详情：文件 / 成员 / 授权 / 审计 / 告警
 
 const PROJECT_TABS = [
-    { key: 'files',   label: '文件管理' },
-    { key: 'members', label: '成员管理' },
-    { key: 'authz',   label: '文件授权' },
-    { key: 'audit',   label: '审计日志' },
-    { key: 'alerts',  label: '异常告警' },
+    { key: 'files',     label: '文件管理' },
+    { key: 'members',   label: '成员管理' },
+    { key: 'authz',     label: '文件授权' },
+    { key: 'alerts',    label: '异常告警' },
+    { key: 'audit',     label: '审计日志' },
+    { key: 'forensics', label: '泄露取证' },
 ];
 
 let _currentProject = null;
@@ -37,7 +38,11 @@ async function renderProjectDetail(root, projectId) {
                         <button class="btn btn-secondary btn-sm" id="edit-project-btn">编辑项目</button>
                         <button class="btn btn-secondary btn-sm" id="delete-project-btn" style="color:var(--color-danger); border-color:var(--color-danger)">删除项目</button>
                     </div>
-                ` : ''}
+                ` : `
+                    <div class="flex gap-2">
+                        <button class="btn btn-secondary btn-sm" id="leave-project-btn" style="color:var(--color-danger); border-color:var(--color-danger)">退出项目</button>
+                    </div>
+                `}
             </div>
         </div>
 
@@ -55,9 +60,11 @@ async function renderProjectDetail(root, projectId) {
     if (isOwnerView) {
         document.getElementById('edit-project-btn').addEventListener('click', showEditProjectModal);
         document.getElementById('delete-project-btn').addEventListener('click', showDeleteProjectModal);
+    } else {
+        document.getElementById('leave-project-btn').addEventListener('click', showLeaveProjectModal);
     }
 
-    switchTab(_currentTab in {files:1,members:1,authz:1,audit:1,alerts:1} ? _currentTab : 'files');
+    switchTab(_currentTab in {files:1,members:1,authz:1,audit:1,alerts:1,forensics:1} ? _currentTab : 'files');
 }
 
 async function showEditProjectModal() {
@@ -150,6 +157,34 @@ async function showDeleteProjectModal() {
     }
 }
 
+async function showLeaveProjectModal() {
+    const p = _currentProject;
+    const body = `
+        <div style="border-left: 3px solid var(--color-warning); background: var(--color-warning-light); padding: 12px 14px; border-radius: var(--radius-md); margin-bottom: var(--space-4);">
+            <div style="font-weight:600; color:var(--color-warning); margin-bottom:6px">退出确认</div>
+            <div class="text-sm">退出项目「<strong>${escapeHtml(p.project_name)}</strong>」后：</div>
+            <ul style="font-size:var(--text-sm); color:var(--text-secondary); margin: 8px 0 0 20px; line-height:1.7">
+                <li>项目将从你的「项目管理」列表中消失</li>
+                <li>你<strong>已获得的文件授权不会自动失效</strong></li>
+                <li>你上传过的文件依然保留在项目里</li>
+                <li>如果想重新加入，需要项目负责人再次添加你</li>
+            </ul>
+        </div>
+    `;
+    const ok = await openModal('退出项目', body, {
+        okText: '确认退出',
+        dangerous: true,
+    });
+    if (!ok) return;
+    try {
+        const resp = await apiPost(`/project/${p.project_id}/leave`, {});
+        toast(resp.message || '已退出', 'success');
+        setTimeout(() => { location.hash = '#/projects'; }, 600);
+    } catch (err) {
+        toast(err.message || '退出失败', 'error');
+    }
+}
+
 function switchTab(key) {
     _currentTab = key;
     document.querySelectorAll('#project-tabs .tab').forEach(btn => {
@@ -158,11 +193,12 @@ function switchTab(key) {
     const c = document.getElementById('tab-content');
     c.innerHTML = loadingHtml();
     const pid = _currentProject.project_id;
-    if (key === 'files')   return renderFilesTab(c, pid);
-    if (key === 'members') return renderMembersTab(c, pid);
-    if (key === 'authz')   return renderAuthzTab(c, pid);
-    if (key === 'audit')   return renderAuditTab(c, pid);
-    if (key === 'alerts')  return renderAlertsTab(c, pid);
+    if (key === 'files')     return renderFilesTab(c, pid);
+    if (key === 'members')   return renderMembersTab(c, pid);
+    if (key === 'authz')     return renderAuthzTab(c, pid);
+    if (key === 'audit')     return renderAuditTab(c, pid);
+    if (key === 'alerts')    return renderAlertsTab(c, pid);
+    if (key === 'forensics') return renderForensicsTab(c, pid);
 }
 
 function getMyRole() {
@@ -226,8 +262,8 @@ async function renderFilesTab(c, pid) {
                                             ? `<button class="btn btn-text btn-sm" onclick="downloadFileById(${f.file_id})">下载</button>`
                                             : `<button class="btn btn-text btn-sm btn-disabled" title="无权限：请先获得文件所有者的授权" onclick="toast('无权限下载，请联系上传者授权','warning')">下载</button>`}
                                         ${canAccess
-                                            ? `<button class="btn btn-text btn-sm" onclick="showGrantModal(${f.file_id}, ${nameJson}, ${JSON.stringify(f.uploader_username).replace(/"/g,'&quot;')})">授权</button>`
-                                            : `<button class="btn btn-text btn-sm btn-disabled" title="无权限：你不持有该文件的访问权，无法转授" onclick="toast('无权限授权，你需要先获得该文件的访问权','warning')">授权</button>`}
+                                            ? `<button class="btn btn-text btn-sm" onclick="showGrantModal(${f.file_id}, ${nameJson}, ${JSON.stringify(f.uploader_username).replace(/"/g,'&quot;')})">${isMine ? '授权' : '转授'}</button>`
+                                            : `<button class="btn btn-text btn-sm btn-disabled" title="无权限：你不持有该文件的访问权" onclick="toast('无权限分发，你需要先获得该文件的访问权','warning')">转授</button>`}
                                         ${canDelete
                                             ? `<button class="btn btn-text btn-sm" style="color:var(--color-danger)" onclick="deleteFile(${f.file_id}, ${nameJson})">删除</button>`
                                             : ''}
@@ -285,7 +321,11 @@ async function deleteFile(fileId, fileName) {
 
 async function showGrantModal(fileId, fileName, uploaderUsername) {
     const myName = getUsername();
-    // grantee 候选 = 当前项目的成员，排除自己 和 文件上传者（上传者自带自钥包，无需再授权）
+    const isTransfer = uploaderUsername !== myName;   // 不是上传者 → 转授
+    const verbA = isTransfer ? '转授' : '授权';        // 动词
+    const verbN = isTransfer ? '转授' : '授权';        // 名词
+
+    // grantee 候选 = 当前项目的成员，排除自己 和 文件上传者
     const pid = _currentProject.project_id;
     let members = [];
     try {
@@ -296,7 +336,7 @@ async function showGrantModal(fileId, fileName, uploaderUsername) {
     }
     const grantees = members.filter(m => m.username !== myName && m.username !== uploaderUsername);
     if (!grantees.length) {
-        toast('当前项目暂无可授权的其他成员', 'warning');
+        toast(`当前项目暂无可${verbA}的其他成员`, 'warning');
         return;
     }
 
@@ -305,14 +345,18 @@ async function showGrantModal(fileId, fileName, uploaderUsername) {
     const pad = n => String(n).padStart(2, '0');
     const defaultStr = `${defaultExpire.getFullYear()}-${pad(defaultExpire.getMonth()+1)}-${pad(defaultExpire.getDate())} ${pad(defaultExpire.getHours())}:${pad(defaultExpire.getMinutes())}`;
 
+    const hintText = isTransfer
+        ? `该文件由 ${uploaderUsername} 上传；你是经过${verbN}获得访问权，可以继续把权限转给项目内其他成员。`
+        : '被授权人将获得下载与转授该文件的权限。';
+
     const body = `
         <div class="form-group">
             <label class="form-label">文件</label>
             <div>${escapeHtml(fileName)}</div>
-            <div class="text-sm text-muted mt-2">被授权人将获得下载与转授该文件的权限</div>
+            <div class="text-sm text-muted mt-2">${escapeHtml(hintText)}</div>
         </div>
         <div class="form-group">
-            <label class="form-label">授权给</label>
+            <label class="form-label">${verbA}给</label>
             <select class="select" name="grantee_username" required>
                 ${grantees.map(m => `<option value="${escapeHtml(m.username)}">${escapeHtml(m.username)} · ${escapeHtml(ROLE_LABEL[m.role] || m.role)}</option>`).join('')}
             </select>
@@ -326,8 +370,8 @@ async function showGrantModal(fileId, fileName, uploaderUsername) {
             <input class="input" type="number" name="max_downloads" min="1" placeholder="不限">
         </div>
     `;
-    const modalPromise = openModal('授权文件给其他用户', body, { okText: '授权' });
-    // openModal 同步把节点插入 DOM，立即绑定日期选择器
+    const modalTitle = isTransfer ? '转授该文件给项目成员' : '授权文件给项目成员';
+    const modalPromise = openModal(modalTitle, body, { okText: verbA });
     const input = document.getElementById('grant-expire-input');
     if (input) bindDatePicker(input, { initial: defaultExpire, min: new Date() });
     const ok = await modalPromise;
@@ -351,9 +395,9 @@ async function showGrantModal(fileId, fileName, uploaderUsername) {
             expire_minutes: minutes,
             max_downloads: ok.max_downloads ? parseInt(ok.max_downloads) : null,
         });
-        toast('授权成功', 'success');
+        toast(`${verbA}成功`, 'success');
     } catch (err) {
-        toast(err.message || '授权失败', 'error');
+        toast(err.message || `${verbA}失败`, 'error');
     }
 }
 
@@ -603,8 +647,8 @@ let _auditHasMore = true;
 
 async function renderAuditTab(c, pid) {
     const role = getMyRole();
-    if (role !== 'owner' && role !== 'auditor') {
-        c.innerHTML = `<div class="card">${emptyState('无权访问', '仅项目负责人和审计员可以查看审计日志')}</div>`;
+    if (role !== 'auditor') {
+        c.innerHTML = `<div class="card">${emptyState('无权访问', '审计日志仅限项目审计员查看')}</div>`;
         return;
     }
 
@@ -733,11 +777,11 @@ function alertTypeLabel(t) {
     return ALERT_TYPE_LABEL[t] || t;
 }
 
-// ========== Tab 5：异常告警 ==========
+// ========== Tab：异常告警（仅 auditor 可见） ==========
 async function renderAlertsTab(c, pid) {
     const role = getMyRole();
-    if (role !== 'owner' && role !== 'auditor') {
-        c.innerHTML = `<div class="card">${emptyState('无权访问', '仅项目负责人和审计员可以查看告警')}</div>`;
+    if (role !== 'auditor') {
+        c.innerHTML = `<div class="card">${emptyState('无权访问', '异常告警仅限项目审计员查看')}</div>`;
         return;
     }
     try {
@@ -816,5 +860,131 @@ async function deleteAlert(alertId) {
         renderAlertsTab(document.getElementById('tab-content'), _currentProject.project_id);
     } catch (err) {
         toast(err.message || '删除失败', 'error');
+    }
+}
+
+// ========== Tab 6：泄露取证 ==========
+async function renderForensicsTab(c, pid) {
+    const role = getMyRole();
+    if (role !== 'auditor') {
+        c.innerHTML = `<div class="card">${emptyState('无权访问', '泄露取证仅限项目审计员执行')}</div>`;
+        return;
+    }
+    c.innerHTML = `
+        <div class="card mb-4">
+            <div class="card-title">泄露文件追溯</div>
+            <p class="text-secondary text-sm" style="margin-bottom:var(--space-4)">
+                上传疑似泄露的文件，平台将从其数字水印中提取指纹，定位下载者。
+                <strong>只能追溯从本项目下载的文件</strong>，跨项目命中不会披露下载者信息。
+            </p>
+            <div class="upload-zone" id="forensics-zone">
+                <div class="upload-zone-title">📄 拖拽文件到这里 或 点击选择文件</div>
+                <div class="upload-zone-hint">支持 PDF / Word / 图片 / 文本等格式</div>
+                <input type="file" id="forensics-file-input" style="display:none">
+            </div>
+        </div>
+        <div id="forensics-result"></div>
+    `;
+
+    const zone = document.getElementById('forensics-zone');
+    const fileInput = document.getElementById('forensics-file-input');
+
+    zone.addEventListener('click', () => fileInput.click());
+    zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('dragover'); });
+    zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
+    zone.addEventListener('drop', (e) => {
+        e.preventDefault();
+        zone.classList.remove('dragover');
+        if (e.dataTransfer.files.length) handleProjectForensics(pid, e.dataTransfer.files[0]);
+    });
+    fileInput.addEventListener('change', (e) => {
+        if (e.target.files.length) handleProjectForensics(pid, e.target.files[0]);
+    });
+}
+
+async function handleProjectForensics(pid, file) {
+    const result = document.getElementById('forensics-result');
+    result.innerHTML = `<div class="card">${loadingHtml('正在分析文件指纹…')}</div>`;
+    try {
+        const fd = new FormData();
+        fd.append('file', file);
+        const r = await apiUpload(`/project/${pid}/forensics`, fd);
+
+        if (r.matched) {
+            // 命中本项目 —— 展示下载人 + 下载时间
+            result.innerHTML = `
+                <div class="card">
+                    <div class="card-title">
+                        <span class="badge badge-danger">已匹配</span>
+                        &nbsp;追溯到泄露源
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">取证文件</label>
+                        <div><strong>${escapeHtml(file.name)}</strong></div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">下载用户</label>
+                        <div><strong style="font-size:var(--text-lg)">${escapeHtml(r.username || '-')}</strong></div>
+                    </div>
+                    <div class="form-group" style="margin-bottom:0">
+                        <label class="form-label">下载时间</label>
+                        <div>${formatTime(r.download_time)}</div>
+                    </div>
+                    <button class="btn btn-primary mt-4" id="forensics-report-btn">下载取证报告（PDF）</button>
+                </div>
+            `;
+            document.getElementById('forensics-report-btn')
+                .addEventListener('click', () => downloadForensicsReport(pid, file));
+        } else if (r.cross_project) {
+            // 跨项目命中 —— 明确不披露
+            result.innerHTML = `
+                <div class="card" style="border-left:3px solid var(--color-warning)">
+                    <div class="card-title">
+                        <span class="badge badge-warning">跨项目命中</span>
+                    </div>
+                    <p class="text-sm text-secondary">取证文件：<strong>${escapeHtml(file.name)}</strong></p>
+                    <p>${escapeHtml(r.message)}</p>
+                    <p class="text-secondary text-sm mt-2">
+                        请联系该文件所属项目的负责人在他们的项目内执行取证。
+                    </p>
+                </div>
+            `;
+        } else {
+            // 未匹配
+            result.innerHTML = `
+                <div class="card">
+                    <div class="card-title">
+                        <span class="badge badge-muted">未匹配</span>
+                    </div>
+                    <p class="text-sm text-secondary">取证文件：<strong>${escapeHtml(file.name)}</strong></p>
+                    <p>${escapeHtml(r.message)}</p>
+                </div>
+            `;
+        }
+    } catch (err) {
+        result.innerHTML = `<div class="card" style="color:var(--color-danger)">${escapeHtml(err.message)}</div>`;
+    }
+}
+
+async function downloadForensicsReport(pid, file) {
+    try {
+        const fd = new FormData();
+        fd.append('file', file);
+        const resp = await api(`/project/${pid}/forensics/report`, { method: 'POST', body: fd });
+        const blob = await resp.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        const ct = resp.headers.get('Content-Type') || '';
+        const ext = ct.includes('pdf') ? 'pdf' : 'txt';
+        const prefix = (file.name || '').replace(/\.[^.]+$/, '') || 'forensics';
+        a.download = `取证报告_${prefix}.${ext}`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        toast('报告已下载', 'success');
+    } catch (err) {
+        toast(err.message || '下载失败', 'error');
     }
 }
