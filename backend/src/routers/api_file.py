@@ -1,4 +1,5 @@
 """文件上传 / 下载 / 列表 / 取证。"""
+import asyncio
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, UploadFile, File, Form, Request, HTTPException
@@ -26,7 +27,10 @@ async def upload(project_id: int = Form(...),
                  db: Session = Depends(get_db)):
     me = db.query(User).get(sess["user_id"])
     data = await file.read()
-    fm = file_service.upload_file(
+    # SM3 摘要 + SM4 加密整块明文是 CPU 密集且纯 Python 实现，
+    # 放到默认线程池里跑，避免阻塞事件循环。
+    fm = await asyncio.to_thread(
+        file_service.upload_file,
         db, me, sess["sm2_private_key_hex"],
         project_id, file.filename or "unnamed", data,
     )
