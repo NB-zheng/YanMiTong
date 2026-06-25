@@ -287,9 +287,16 @@ async function renderFilesTab(c, pid) {
             fd.append('file', file);
             const uploadBtn = document.getElementById('upload-btn');
             uploadBtn.disabled = true;
-            uploadBtn.textContent = '上传中…';
+            uploadBtn.textContent = '上传中 0%';
             try {
-                await apiUpload('/file/upload', fd);
+                await apiUploadWithProgress('/file/upload', fd, (p) => {
+                    if (p.phase === 'upload') {
+                        uploadBtn.textContent = `上传中 ${p.percent}%`;
+                    } else if (p.phase === 'server') {
+                        // 字节已传完，后端在做 SM3 摘要 + SM4 加密 + 入库
+                        uploadBtn.textContent = '服务端加密中…';
+                    }
+                });
                 toast('文件上传成功', 'success');
                 renderFilesTab(c, pid);
             } catch (err) {

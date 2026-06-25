@@ -54,6 +54,45 @@ async function apiUpload(path, formData) {
     })).json();
 }
 
+// 带进度回调的上传：网络阶段触发 onProgress({phase:'upload', percent}),
+// 上传完字节后服务端还要做 SM3/SM4，触发 onProgress({phase:'server'})。
+function apiUploadWithProgress(path, formData, onProgress) {
+    return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', API_BASE + path);
+        const token = getToken();
+        if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+
+        xhr.upload.onprogress = (e) => {
+            if (!onProgress || !e.lengthComputable) return;
+            const percent = Math.round((e.loaded / e.total) * 100);
+            onProgress({ phase: 'upload', percent });
+        };
+        xhr.upload.onload = () => {
+            if (onProgress) onProgress({ phase: 'server' });
+        };
+        xhr.onerror = () => reject(new Error('网络错误'));
+        xhr.onabort = () => reject(new Error('上传已取消'));
+        xhr.onload = () => {
+            if (xhr.status === 401) {
+                clearSession();
+                if (location.pathname !== '/login.html' && location.pathname !== '/register.html') {
+                    window.location.href = '/login.html';
+                }
+                return reject(new Error('未授权'));
+            }
+            if (xhr.status < 200 || xhr.status >= 300) {
+                let detail = '上传失败';
+                try { detail = JSON.parse(xhr.responseText).detail || detail; } catch (_) {}
+                return reject(new Error(detail));
+            }
+            try { resolve(JSON.parse(xhr.responseText)); }
+            catch (_) { resolve({}); }
+        };
+        xhr.send(formData);
+    });
+}
+
 async function apiDownload(path) {
     return api(path);
 }
