@@ -3,7 +3,6 @@
 const ROLE_LABEL = {
     owner:   '负责人',
     member:  '成员',
-    partner: '合作方',
     auditor: '审计员',
 };
 

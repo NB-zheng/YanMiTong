@@ -98,8 +98,13 @@ async function apiDownload(path) {
 }
 
 // 文件下载（含中文文件名解析）
-async function downloadFileById(fileId) {
+// onProgress 回调：{phase:'decrypt', percent:0-100} 或 {phase:'download', percent:0-100}
+async function downloadFileById(fileId, onProgress) {
+    // 阶段1：等待服务端解密（服务端解密耗时，无进度）
+    onProgress && onProgress({ phase: 'decrypt', percent: 0 });
     const resp = await apiDownload(`/file/${fileId}/download`);
+    onProgress && onProgress({ phase: 'decrypt', percent: 100 });
+
     const disposition = resp.headers.get('Content-Disposition') || '';
     let filename = 'download';
     const m = disposition.match(/filename\*=UTF-8''([^;]+)/);
@@ -109,7 +114,22 @@ async function downloadFileById(fileId) {
         const m2 = disposition.match(/filename="([^"]+)"/);
         if (m2) filename = m2[1];
     }
-    const blob = await resp.blob();
+
+    // 阶段2：下载密文到本地
+    const reader = resp.body.getReader();
+    const contentLength = parseInt(resp.headers.get('Content-Length') || '0', 10);
+    let receivedLength = 0;
+    const chunks = [];
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        receivedLength += value.length;
+        if (contentLength > 0 && onProgress) {
+            onProgress({ phase: 'download', percent: Math.round((receivedLength / contentLength) * 100) });
+        }
+    }
+    const blob = new Blob(chunks);
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -118,4 +138,5 @@ async function downloadFileById(fileId) {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+    onProgress && onProgress({ phase: 'done' });
 }

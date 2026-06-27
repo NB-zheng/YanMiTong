@@ -1,4 +1,11 @@
 // 项目详情：文件 / 成员 / 授权 / 审计 / 告警
+//
+// 角色权限矩阵（与后端 service 层断言保持一致）：
+// - owner   : 拥有项目一切权利（含审计 / 告警 / 取证）
+// - member  : 只能下载被授权的文件，不能上传 / 授权 / 删文件 / 管理成员
+// - auditor : 只能查看审计 / 告警 / 取证 + 下载被授权的文件
+//
+// 角色来源：项目详情接口的 viewer_role 字段（与 _currentMembers 二次校验冗余）。
 
 const PROJECT_TABS = [
     { key: 'files',     label: '文件管理' },
@@ -8,6 +15,10 @@ const PROJECT_TABS = [
     { key: 'audit',     label: '审计日志' },
     { key: 'forensics', label: '泄露取证' },
 ];
+
+// 注：ROLE_LABEL（owner/member/auditor 中文标签）已在 projects.js 顶层声明并复用，
+// 这里不要重复声明（会触发 SyntaxError）。select option 里需要的中文标签直接在
+// 局部用 ROLE_LABEL_OPT 变量，不污染顶层作用域。
 
 let _currentProject = null;
 let _currentMembers = [];
@@ -22,7 +33,40 @@ async function renderProjectDetail(root, projectId) {
         return;
     }
 
-    const isOwnerView = isOwner();
+    const role = _currentProject.viewer_role;
+    const isOwner = role === 'owner';
+    const isMember = role === 'member' || role === 'auditor' || role === 'owner';
+
+    // 非成员（被移除 / 退出项目后还在该 URL）：给一个清晰提示
+    if (!isMember) {
+        root.innerHTML = `
+            <div class="project-detail-header">
+                <button class="back-link" onclick="location.hash='#/projects'">← 返回项目列表</button>
+                <div class="page-header">
+                    <div style="min-width:0; flex:1">
+                        <div class="page-title">${escapeHtml(_currentProject.project_name)}</div>
+                        <div class="page-subtitle text-muted">您已不在该项目中，仅可查看只读信息。</div>
+                    </div>
+                </div>
+            </div>
+            <div class="card">
+                ${emptyState('无权操作', '您不是该项目的成员，所有操作按钮均已禁用')}
+            </div>
+        `;
+        return;
+    }
+
+    // 顶部操作按钮：
+    // - owner : 编辑 + 删除
+    // - 其它 : 退出（owner 不可退出自己创建的项目 —— 后端会 400，这里也不显示）
+    const actionButtons = isOwner ? `
+        <div class="flex gap-2">
+            <button class="btn btn-secondary btn-sm" id="edit-project-btn">编辑项目</button>
+            <button class="btn btn-secondary btn-sm" id="delete-project-btn" style="color:var(--color-danger); border-color:var(--color-danger)">删除项目</button>
+        </div>` : `
+        <div class="flex gap-2">
+            <button class="btn btn-secondary btn-sm" id="leave-project-btn" style="color:var(--color-danger); border-color:var(--color-danger)">退出项目</button>
+        </div>`;
 
     root.innerHTML = `
         <div class="project-detail-header">
@@ -33,16 +77,7 @@ async function renderProjectDetail(root, projectId) {
                     <div class="page-subtitle project-desc-clamp" title="${escapeHtml(_currentProject.description || '暂无描述')}">${escapeHtml(_currentProject.description || '暂无描述')}</div>
                     <div class="page-subtitle text-muted" style="margin-top:2px">创建于 ${formatTime(_currentProject.created_time)}</div>
                 </div>
-                ${isOwnerView ? `
-                    <div class="flex gap-2">
-                        <button class="btn btn-secondary btn-sm" id="edit-project-btn">编辑项目</button>
-                        <button class="btn btn-secondary btn-sm" id="delete-project-btn" style="color:var(--color-danger); border-color:var(--color-danger)">删除项目</button>
-                    </div>
-                ` : `
-                    <div class="flex gap-2">
-                        <button class="btn btn-secondary btn-sm" id="leave-project-btn" style="color:var(--color-danger); border-color:var(--color-danger)">退出项目</button>
-                    </div>
-                `}
+                ${actionButtons}
             </div>
         </div>
 
@@ -57,7 +92,7 @@ async function renderProjectDetail(root, projectId) {
         btn.addEventListener('click', () => switchTab(btn.dataset.tab));
     });
 
-    if (isOwnerView) {
+    if (isOwner) {
         document.getElementById('edit-project-btn').addEventListener('click', showEditProjectModal);
         document.getElementById('delete-project-btn').addEventListener('click', showDeleteProjectModal);
     } else {
@@ -201,17 +236,41 @@ function switchTab(key) {
     if (key === 'forensics') return renderForensicsTab(c, pid);
 }
 
-function getMyRole() {
-    const myName = getUsername();
-    const m = _currentMembers.find(m => m.username === myName);
-    return m ? m.role : null;
+// ===== 角色 helpers（全部基于 viewer_role 字段） =====
+function viewerRole() {
+    return _currentProject ? _currentProject.viewer_role : null;
 }
-
-function isOwner() {
-    return _currentProject && _currentProject.owner_username === getUsername();
-}
+function isOwner()    { return viewerRole() === 'owner'; }
+function isAuditor()  { return viewerRole() === 'auditor'; }
+function isMember()   { return viewerRole() === 'member'; }
+function canAudit()   { return isOwner() || isAuditor(); }
+// 兼容旧调用（少数位置仍可能用到）
+function getMyRole()   { return viewerRole(); }
 
 // ========== Tab 1：文件管理 ==========
+// 带状态反馈的下载包装函数
+async function downloadFileWithFeedback(fileId) {
+    const btn = document.getElementById(`download-btn-${fileId}`);
+    if (!btn) return;
+    const originalText = btn.textContent;
+    btn.disabled = true;
+
+    try {
+        await downloadFileById(fileId, (p) => {
+            if (p.phase === 'decrypt') {
+                btn.textContent = '解密中…';
+            } else if (p.phase === 'download') {
+                btn.textContent = `下载中 ${p.percent}%`;
+            }
+        });
+    } catch (err) {
+        toast(err.message || '下载失败', 'error');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = originalText;
+    }
+}
+
 async function renderFilesTab(c, pid) {
     try {
         const [files, receivedAuths] = await Promise.all([
@@ -219,18 +278,27 @@ async function renderFilesTab(c, pid) {
             apiGet('/authz/granted-to-me').catch(() => []),
         ]);
         const myName = getUsername();
-        // 当前用户可访问的 file_id 集合：我上传的 + 别人有效授权给我的
+        // 当前用户可访问的 file_id 集合：我作为 owner 自有全部 + 别人有效授权给我的
+        // 非 owner 需要按授权表判断可见性；owner 直接可见全部项目文件。
         const accessibleIds = new Set();
-        for (const a of receivedAuths) {
-            if (a.status === 'valid') accessibleIds.add(a.file_id);
+        if (isOwner()) {
+            for (const f of files) accessibleIds.add(f.file_id);
+        } else {
+            for (const a of receivedAuths) {
+                if (a.status === 'valid') accessibleIds.add(a.file_id);
+            }
         }
 
-        c.innerHTML = `
+        // 顶部按钮：仅 owner 显示"上传文件"
+        const headerHtml = `
             <div class="flex-between mb-4">
                 <div class="text-secondary">共 ${files.length} 个文件</div>
-                <button class="btn btn-primary" id="upload-btn">+ 上传文件</button>
-                <input type="file" id="file-input" style="display:none">
-            </div>
+                ${isOwner() ? `<button class="btn btn-primary" id="upload-btn">+ 上传文件</button>
+                <input type="file" id="file-input" style="display:none">` : ''}
+            </div>`;
+
+        c.innerHTML = `
+            ${headerHtml}
             ${files.length ? `
                 <div class="table-wrap">
                     <table class="table">
@@ -247,8 +315,11 @@ async function renderFilesTab(c, pid) {
                         <tbody>
                             ${files.map(f => {
                                 const isMine = f.uploader_username === myName;
-                                const canAccess = isMine || accessibleIds.has(f.file_id);
-                                const canDelete = isMine || isOwner();
+                                const canAccess = isOwner() || isMine || accessibleIds.has(f.file_id);
+                                // 仅有授权访问权且是 owner，才能发起 grant（按产品矩阵）
+                                const canGrant = isOwner() && canAccess;
+                                // 删除文件：仅 owner
+                                const canDelete = isOwner();
                                 const nameJson = JSON.stringify(f.original_filename).replace(/"/g,'&quot;');
                                 return `
                                 <tr>
@@ -259,11 +330,11 @@ async function renderFilesTab(c, pid) {
                                     <td class="text-secondary">${formatTime(f.created_time)}</td>
                                     <td>
                                         ${canAccess
-                                            ? `<button class="btn btn-text btn-sm" onclick="downloadFileById(${f.file_id})">下载</button>`
-                                            : `<button class="btn btn-text btn-sm btn-disabled" title="无权限：请先获得文件所有者的授权" onclick="toast('无权限下载，请联系上传者授权','warning')">下载</button>`}
-                                        ${canAccess
-                                            ? `<button class="btn btn-text btn-sm" onclick="showGrantModal(${f.file_id}, ${nameJson}, ${JSON.stringify(f.uploader_username).replace(/"/g,'&quot;')})">${isMine ? '授权' : '转授'}</button>`
-                                            : `<button class="btn btn-text btn-sm btn-disabled" title="无权限：你不持有该文件的访问权" onclick="toast('无权限分发，你需要先获得该文件的访问权','warning')">转授</button>`}
+                                            ? `<button class="btn btn-text btn-sm" id="download-btn-${f.file_id}" onclick="downloadFileWithFeedback(${f.file_id})">下载</button>`
+                                            : `<button class="btn btn-text btn-sm btn-disabled" title="无权限：请先获得文件所有者的授权" onclick="toast('无权限下载，请联系项目负责人授权','warning')">下载</button>`}
+                                        ${canGrant
+                                            ? `<button class="btn btn-text btn-sm" onclick="showGrantModal(${f.file_id}, ${nameJson}, ${JSON.stringify(f.uploader_username).replace(/"/g,'&quot;')})">授权</button>`
+                                            : ''}
                                         ${canDelete
                                             ? `<button class="btn btn-text btn-sm" style="color:var(--color-danger)" onclick="deleteFile(${f.file_id}, ${nameJson})">删除</button>`
                                             : ''}
@@ -274,43 +345,50 @@ async function renderFilesTab(c, pid) {
                         </tbody>
                     </table>
                 </div>
-            ` : emptyState('暂无文件', '点击上方"上传文件"按钮添加第一个文件')}
+            ` : emptyState('暂无文件', isOwner() ? '点击上方"上传文件"按钮添加第一个文件' : '等待项目负责人上传文件')}
         `;
 
-        const input = document.getElementById('file-input');
-        document.getElementById('upload-btn').addEventListener('click', () => input.click());
-        input.addEventListener('change', async (e) => {
-            const file = e.target.files[0];
-            if (!file) return;
-            const fd = new FormData();
-            fd.append('project_id', String(pid));
-            fd.append('file', file);
-            const uploadBtn = document.getElementById('upload-btn');
-            uploadBtn.disabled = true;
-            uploadBtn.textContent = '上传中 0%';
-            try {
-                await apiUploadWithProgress('/file/upload', fd, (p) => {
-                    if (p.phase === 'upload') {
-                        uploadBtn.textContent = `上传中 ${p.percent}%`;
-                    } else if (p.phase === 'server') {
-                        // 字节已传完，后端在做 SM3 摘要 + SM4 加密 + 入库
-                        uploadBtn.textContent = '服务端加密中…';
-                    }
-                });
-                toast('文件上传成功', 'success');
-                renderFilesTab(c, pid);
-            } catch (err) {
-                toast(err.message || '上传失败', 'error');
-                uploadBtn.disabled = false;
-                uploadBtn.textContent = '+ 上传文件';
-            }
-        });
+        // 仅 owner 绑定上传控件
+        if (isOwner()) {
+            const input = document.getElementById('file-input');
+            document.getElementById('upload-btn').addEventListener('click', () => input.click());
+            input.addEventListener('change', async (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                const fd = new FormData();
+                fd.append('project_id', String(pid));
+                fd.append('file', file);
+                const uploadBtn = document.getElementById('upload-btn');
+                uploadBtn.disabled = true;
+                uploadBtn.textContent = '上传中 0%';
+                try {
+                    await apiUploadWithProgress('/file/upload', fd, (p) => {
+                        if (p.phase === 'upload') {
+                            uploadBtn.textContent = `上传中 ${p.percent}%`;
+                        } else if (p.phase === 'server') {
+                            // 字节已传完，后端在做 SM3 摘要 + SM4 加密 + 入库
+                            uploadBtn.textContent = '服务端加密中…';
+                        }
+                    });
+                    toast('文件上传成功', 'success');
+                    renderFilesTab(c, pid);
+                } catch (err) {
+                    toast(err.message || '上传失败', 'error');
+                    uploadBtn.disabled = false;
+                    uploadBtn.textContent = '+ 上传文件';
+                }
+            });
+        }
     } catch (err) {
         c.innerHTML = `<div class="card" style="color:var(--color-danger)">${escapeHtml(err.message)}</div>`;
     }
 }
 
 async function deleteFile(fileId, fileName) {
+    if (!isOwner()) {
+        toast('仅项目负责人可删除文件', 'error');
+        return;
+    }
     const ok = await confirmDialog(
         '删除文件',
         `确认删除「${fileName}」？该操作不可撤销，会同时删除文件的所有授权。`,
@@ -327,10 +405,13 @@ async function deleteFile(fileId, fileName) {
 }
 
 async function showGrantModal(fileId, fileName, uploaderUsername) {
+    if (!isOwner()) {
+        toast('仅项目负责人可发起授权', 'error');
+        return;
+    }
     const myName = getUsername();
     const isTransfer = uploaderUsername !== myName;   // 不是上传者 → 转授
     const verbA = isTransfer ? '转授' : '授权';        // 动词
-    const verbN = isTransfer ? '转授' : '授权';        // 名词
 
     // grantee 候选 = 当前项目的成员，排除自己 和 文件上传者
     const pid = _currentProject.project_id;
@@ -353,8 +434,8 @@ async function showGrantModal(fileId, fileName, uploaderUsername) {
     const defaultStr = `${defaultExpire.getFullYear()}-${pad(defaultExpire.getMonth()+1)}-${pad(defaultExpire.getDate())} ${pad(defaultExpire.getHours())}:${pad(defaultExpire.getMinutes())}`;
 
     const hintText = isTransfer
-        ? `该文件由 ${uploaderUsername} 上传；你是经过${verbN}获得访问权，可以继续把权限转给项目内其他成员。`
-        : '被授权人将获得下载与转授该文件的权限。';
+        ? `该文件由 ${uploaderUsername} 上传；你是经过授权获得访问权，可以继续把权限转给项目内其他成员。`
+        : '被授权人将获得下载该文件的权限。';
 
     const body = `
         <div class="form-group">
@@ -409,14 +490,16 @@ async function showGrantModal(fileId, fileName, uploaderUsername) {
 }
 
 // ========== Tab 2：成员管理 ==========
+// 可见性：所有项目成员都能看到成员列表。
+// 操作：只有项目负责人 (owner) 能"添加成员 / 改角色 / 移除"。
 async function renderMembersTab(c, pid) {
     try {
         _currentMembers = await apiGet(`/project/${pid}/members`);
-        const owner = isOwner();
+        const ownerView = isOwner();
         c.innerHTML = `
             <div class="flex-between mb-4">
                 <div class="text-secondary">共 ${_currentMembers.length} 名成员</div>
-                ${owner ? `<button class="btn btn-primary" id="add-member-btn">+ 添加成员</button>` : ''}
+                ${ownerView ? `<button class="btn btn-primary" id="add-member-btn">+ 添加成员</button>` : ''}
             </div>
             <div class="table-wrap">
                 <table class="table">
@@ -425,28 +508,33 @@ async function renderMembersTab(c, pid) {
                             <th>用户名</th>
                             <th>角色</th>
                             <th>加入时间</th>
-                            ${owner ? '<th>操作</th>' : ''}
+                            <th>操作</th>
                         </tr>
                     </thead>
                     <tbody>
-                        ${_currentMembers.map(m => `
+                        ${_currentMembers.map(m => {
+                            const isOwnerRow = m.role === 'owner';
+                        
+                            // 其余成员由 owner 看到「改角色 / 移除」按钮，非 owner 看到「-」。
+                            const actionCell = isOwnerRow
+                                ? '<span class="text-muted text-sm">-</span>'
+                                : (ownerView
+                                    ? `<button class="btn btn-text btn-sm" onclick="changeMemberRole(${pid}, ${JSON.stringify(m.username).replace(/"/g,'&quot;')}, ${JSON.stringify(m.role).replace(/"/g,'&quot;')})">改角色</button>
+                                       <button class="btn btn-text btn-sm" style="color:var(--color-danger)" onclick="removeMember(${pid}, ${JSON.stringify(m.username).replace(/"/g,'&quot;')})">移除</button>`
+                                    : '<span class="text-muted text-sm">-</span>');
+                            return `
                             <tr>
                                 <td><strong>${escapeHtml(m.username)}</strong></td>
                                 <td>${roleBadge(m.role)}</td>
                                 <td class="text-secondary">${formatTime(m.joined_time)}</td>
-                                ${owner ? `<td>
-                                    ${m.role !== 'owner'
-                                        ? `<button class="btn btn-text btn-sm" onclick="changeMemberRole(${pid}, ${JSON.stringify(m.username).replace(/"/g,'&quot;')}, ${JSON.stringify(m.role).replace(/"/g,'&quot;')})">改角色</button>
-                                           <button class="btn btn-text btn-sm" style="color:var(--color-danger)" onclick="removeMember(${pid}, ${JSON.stringify(m.username).replace(/"/g,'&quot;')})">移除</button>`
-                                        : '-'}
-                                </td>` : ''}
-                            </tr>
-                        `).join('')}
+                                <td>${actionCell}</td>
+                            </tr>`;
+                        }).join('')}
                     </tbody>
                 </table>
             </div>
         `;
-        if (owner) {
+        if (ownerView) {
             document.getElementById('add-member-btn').addEventListener('click', () => showAddMemberModal(pid));
         }
     } catch (err) {
@@ -464,9 +552,9 @@ async function showAddMemberModal(pid) {
             <label class="form-label">角色</label>
             <select class="select" name="role">
                 <option value="member">成员（member）</option>
-                <option value="partner">合作方（partner）</option>
                 <option value="auditor">审计员（auditor）</option>
             </select>
+            <div class="text-sm text-muted mt-2">负责人 (owner) 由创建者担任，不通过此接口指定。</div>
         </div>
     `;
     const r = await openModal('添加成员', body, { okText: '添加' });
@@ -499,9 +587,12 @@ async function showAddMemberModal(pid) {
 }
 
 async function changeMemberRole(pid, username, currentRole) {
+    if (!isOwner()) {
+        toast('仅项目负责人可修改成员角色', 'error');
+        return;
+    }
     const roles = [
-        ['member', '成员'],
-        ['partner', '合作方'],
+        ['member',  '成员'],
         ['auditor', '审计员'],
     ];
     const body = `
@@ -533,6 +624,10 @@ async function changeMemberRole(pid, username, currentRole) {
 }
 
 async function removeMember(pid, username) {
+    if (!isOwner()) {
+        toast('仅项目负责人可移除成员', 'error');
+        return;
+    }
     if (!await confirmDialog('移除成员', `确认要移除用户 ${username} 吗？`, { okText: '移除' })) return;
     try {
         await apiDelete(`/project/${pid}/members/${encodeURIComponent(username)}`);
@@ -546,26 +641,44 @@ async function removeMember(pid, username) {
 // ========== Tab 3：文件授权 ==========
 async function renderAuthzTab(c, pid) {
     try {
-        const [granted, received, files] = await Promise.all([
-            apiGet('/authz/granted-by-me'),
-            apiGet('/authz/granted-to-me'),
-            apiGet(`/file/list?project_id=${pid}`),
-        ]);
+        const myName = getUsername();
+        // owner 同时看两块；member / auditor 只看"我收到的"
+        const apiCalls = isOwner()
+            ? [
+                apiGet('/authz/granted-by-me'),
+                apiGet('/authz/granted-to-me'),
+                apiGet(`/file/list?project_id=${pid}`),
+              ]
+            : [
+                Promise.resolve([]),                                // granted 占位：member/auditor 不显示
+                apiGet('/authz/granted-to-me'),
+                apiGet(`/file/list?project_id=${pid}`),
+              ];
+        const [granted, received, files] = await Promise.all(apiCalls);
         const fileIds = new Set(files.map(f => f.file_id));
         const fileNameMap = Object.fromEntries(files.map(f => [f.file_id, f.original_filename]));
-        const grantedHere = granted.filter(a => fileIds.has(a.file_id));
         const receivedHere = received.filter(a => fileIds.has(a.file_id));
 
-        c.innerHTML = `
-            <div class="card mb-4">
-                <div class="card-title">我授出的（${grantedHere.length}）</div>
-                ${grantedHere.length ? authzTable(grantedHere, fileNameMap, true) : emptyState('暂无授权', '在"文件管理"中选择文件进行授权')}
-            </div>
-            <div class="card">
-                <div class="card-title">我收到的（${receivedHere.length}）</div>
-                ${receivedHere.length ? authzTable(receivedHere, fileNameMap, false) : emptyState('暂无收到的授权', '')}
-            </div>
-        `;
+        if (isOwner()) {
+            // 负责人视角：只显示"我授出的"。
+            // 负责人自己不接收任何授权（grant 接口禁止 grantee==grantor），
+            // "我收到的" 在此场景下恒为空，没有展示价值，因此整块不渲染。
+            const grantedHere = granted.filter(a => fileIds.has(a.file_id));
+            c.innerHTML = `
+                <div class="card">
+                    <div class="card-title">我授出的（${grantedHere.length}）</div>
+                    ${grantedHere.length ? authzTable(grantedHere, fileNameMap, true) : emptyState('暂无授权', '在"文件管理"中选择文件进行授权')}
+                </div>
+            `;
+        } else {
+            // member / auditor 视角：只显示"授权给我"
+            c.innerHTML = `
+                <div class="card">
+                    <div class="card-title">${escapeHtml(myName)} 收到的授权（${receivedHere.length}）</div>
+                    ${receivedHere.length ? authzTable(receivedHere, fileNameMap, false) : emptyState('暂无收到的授权', '请项目负责人在"文件管理"中分配')}
+                </div>
+            `;
+        }
     } catch (err) {
         c.innerHTML = `<div class="card" style="color:var(--color-danger)">${escapeHtml(err.message)}</div>`;
     }
@@ -595,8 +708,10 @@ function authzTable(list, fileNameMap, iAmGrantor) {
                             <td>${statusBadge(a.status)}</td>
                             ${iAmGrantor ? `<td>
                                 ${a.status === 'valid'
-                                    ? `<button class="btn btn-text btn-sm" style="color:var(--color-danger)" onclick="revokeAuth(${a.auth_id})">撤销</button>`
-                                    : '-'}
+                                    ? `<button class="btn btn-text btn-sm" style="color:var(--color-danger)" id="revoke-btn-${a.auth_id}" onclick="revokeAuth(${a.auth_id})">撤销</button>`
+                                    : (a.revoke_mode === 'weak'
+                                        ? `<button class="btn btn-text btn-sm" onclick="restoreAuth(${a.auth_id})">恢复</button>`
+                                        : '<span class="text-muted text-sm">已强撤销</span>')}
                             </td>` : ''}
                         </tr>
                     `).join('')}
@@ -607,13 +722,74 @@ function authzTable(list, fileNameMap, iAmGrantor) {
 }
 
 async function revokeAuth(authId) {
-    if (!await confirmDialog('撤销授权', '撤销将重新生成文件密钥并重加密文件，确认继续？', { okText: '撤销' })) return;
+    if (!isOwner()) {
+        toast('仅项目负责人可撤销授权', 'error');
+        return;
+    }
+    // 模态框：让负责人选择弱撤销或强撤销
+    const body = `
+        <div class="form-group">
+            <label class="form-label">撤销方式</label>
+            <div style="display:flex; flex-direction:column; gap:10px; margin-top:4px">
+                <label style="display:flex; align-items:flex-start; gap:8px; cursor:pointer">
+                    <input type="radio" name="revoke_mode" value="weak" checked style="margin-top:2px">
+                    <span>
+                        <strong>弱撤销</strong><br>
+                        <span class="text-sm text-secondary">仅标记撤销，不重加密文件，执行快，支持后续恢复。适合临时协作到期。</span>
+                    </span>
+                </label>
+                <label style="display:flex; align-items:flex-start; gap:8px; cursor:pointer">
+                    <input type="radio" name="revoke_mode" value="strong" style="margin-top:2px">
+                    <span>
+                        <strong>强撤销</strong><br>
+                        <span class="text-sm text-secondary">重新生成文件密钥并重加密所有副本，密钥层彻底隔离，不可恢复。适合密钥泄露等高安全场景。</span>
+                    </span>
+                </label>
+            </div>
+        </div>
+    `;
+    const r = await openModal('撤销授权', body, { okText: '确认撤销', dangerous: true });
+    if (!r) return;
+    const mode = r.revoke_mode || 'weak';
+    const confirmMsg = mode === 'strong'
+        ? '强撤销将重新生成文件密钥并重加密，确认继续？此操作不可恢复。'
+        : '确认对指定用户撤销授权？撤销后可在「操作」列恢复。';
+    if (!await confirmDialog('确认撤销', confirmMsg, { okText: '确认撤销', dangerous: true })) return;
+
+    // 显示状态反馈
+    const btn = document.getElementById(`revoke-btn-${authId}`);
+    const originalText = btn ? btn.textContent : '撤销';
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = mode === 'strong' ? '重加密中…' : '撤销中…';
+    }
+
     try {
-        await apiPost('/authz/revoke', { auth_id: authId });
-        toast('授权已撤销', 'success');
+        await apiPost('/authz/revoke', { auth_id: authId, mode });
+        toast(mode === 'strong' ? '强撤销完成（文件已重加密）' : '弱撤销完成', 'success');
         renderAuthzTab(document.getElementById('tab-content'), _currentProject.project_id);
     } catch (err) {
         toast(err.message || '撤销失败', 'error');
+        // 恢复按钮状态
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = originalText;
+        }
+    }
+}
+
+async function restoreAuth(authId) {
+    if (!isOwner()) {
+        toast('仅项目负责人可恢复授权', 'error');
+        return;
+    }
+    if (!await confirmDialog('恢复授权', '恢复后用户可重新下载文件，确认继续？', { okText: '恢复' })) return;
+    try {
+        await apiPost('/authz/restore', { auth_id: authId });
+        toast('授权已恢复', 'success');
+        renderAuthzTab(document.getElementById('tab-content'), _currentProject.project_id);
+    } catch (err) {
+        toast(err.message || '恢复失败', 'error');
     }
 }
 
@@ -629,6 +805,7 @@ const OPERATION_LABEL = {
     delete_file:    '删除文件',
     grant:          '文件授权',
     revoke:         '撤销授权',
+    restore_auth:    '恢复授权',
     forensics:      '取证分析',
 };
 // 对象类型 → 中文
@@ -646,16 +823,15 @@ function objectTypeLabel(t) {
     return OBJECT_TYPE_LABEL[t] || (t || '-');
 }
 
-// ========== Tab 4：审计日志 ==========
+// ========== Tab 4：审计日志（owner + auditor） ==========
 const AUDIT_PAGE_SIZE = 50;
 let _auditLoadedLogs = [];   // 累积所有已加载的日志
 let _auditOldestId = null;   // 最早 log_id（游标）
 let _auditHasMore = true;
 
 async function renderAuditTab(c, pid) {
-    const role = getMyRole();
-    if (role !== 'auditor') {
-        c.innerHTML = `<div class="card">${emptyState('无权访问', '审计日志仅限项目审计员查看')}</div>`;
+    if (!canAudit()) {
+        c.innerHTML = `<div class="card">${emptyState('无权访问', '审计日志仅限项目负责人或审计员查看')}</div>`;
         return;
     }
 
@@ -784,11 +960,10 @@ function alertTypeLabel(t) {
     return ALERT_TYPE_LABEL[t] || t;
 }
 
-// ========== Tab：异常告警（仅 auditor 可见） ==========
+// ========== Tab：异常告警（owner + auditor） ==========
 async function renderAlertsTab(c, pid) {
-    const role = getMyRole();
-    if (role !== 'auditor') {
-        c.innerHTML = `<div class="card">${emptyState('无权访问', '异常告警仅限项目审计员查看')}</div>`;
+    if (!canAudit()) {
+        c.innerHTML = `<div class="card">${emptyState('无权访问', '异常告警仅限项目负责人或审计员查看')}</div>`;
         return;
     }
     try {
@@ -850,6 +1025,10 @@ function severityBadge(s) {
 }
 
 async function handleAlert(alertId) {
+    if (!canAudit()) {
+        toast('无权处理告警', 'error');
+        return;
+    }
     try {
         await apiPost(`/audit/alerts/${alertId}/handle`, {});
         toast('已标记处理', 'success');
@@ -860,6 +1039,10 @@ async function handleAlert(alertId) {
 }
 
 async function deleteAlert(alertId) {
+    if (!canAudit()) {
+        toast('无权删除告警', 'error');
+        return;
+    }
     if (!await confirmDialog('删除告警', '确认删除该告警吗？此操作不可恢复。', { okText: '删除' })) return;
     try {
         await apiDelete(`/audit/alerts/${alertId}`);
@@ -870,11 +1053,10 @@ async function deleteAlert(alertId) {
     }
 }
 
-// ========== Tab 6：泄露取证 ==========
+// ========== Tab 6：泄露取证（owner + auditor） ==========
 async function renderForensicsTab(c, pid) {
-    const role = getMyRole();
-    if (role !== 'auditor') {
-        c.innerHTML = `<div class="card">${emptyState('无权访问', '泄露取证仅限项目审计员执行')}</div>`;
+    if (!canAudit()) {
+        c.innerHTML = `<div class="card">${emptyState('无权访问', '泄露取证仅限项目负责人或审计员执行')}</div>`;
         return;
     }
     c.innerHTML = `
@@ -917,57 +1099,86 @@ async function handleProjectForensics(pid, file) {
         fd.append('file', file);
         const r = await apiUpload(`/project/${pid}/forensics`, fd);
 
-        if (r.matched) {
-            // 命中本项目 —— 展示下载人 + 下载时间
-            result.innerHTML = `
-                <div class="card">
-                    <div class="card-title">
-                        <span class="badge badge-danger">已匹配</span>
-                        &nbsp;追溯到泄露源
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">取证文件</label>
-                        <div><strong>${escapeHtml(file.name)}</strong></div>
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">下载用户</label>
-                        <div><strong style="font-size:var(--text-lg)">${escapeHtml(r.username || '-')}</strong></div>
-                    </div>
-                    <div class="form-group" style="margin-bottom:0">
-                        <label class="form-label">下载时间</label>
-                        <div>${formatTime(r.download_time)}</div>
-                    </div>
-                    <button class="btn btn-primary mt-4" id="forensics-report-btn">下载取证报告（PDF）</button>
-                </div>
-            `;
-            document.getElementById('forensics-report-btn')
-                .addEventListener('click', () => downloadForensicsReport(pid, file));
-        } else if (r.cross_project) {
-            // 跨项目命中 —— 明确不披露
-            result.innerHTML = `
-                <div class="card" style="border-left:3px solid var(--color-warning)">
-                    <div class="card-title">
-                        <span class="badge badge-warning">跨项目命中</span>
-                    </div>
-                    <p class="text-sm text-secondary">取证文件：<strong>${escapeHtml(file.name)}</strong></p>
-                    <p>${escapeHtml(r.message)}</p>
-                    <p class="text-secondary text-sm mt-2">
-                        请联系该文件所属项目的负责人在他们的项目内执行取证。
-                    </p>
-                </div>
-            `;
-        } else {
-            // 未匹配
-            result.innerHTML = `
-                <div class="card">
-                    <div class="card-title">
-                        <span class="badge badge-muted">未匹配</span>
-                    </div>
-                    <p class="text-sm text-secondary">取证文件：<strong>${escapeHtml(file.name)}</strong></p>
-                    <p>${escapeHtml(r.message)}</p>
-                </div>
+        const matches = r.matches || [];
+        const leakerCount = r.leaker_count || 0;
+        const crossProjectCount = r.cross_project_count || 0;
+        const totalCount = r.total_count || 0;
+
+        // 构建匹配列表 HTML
+        let matchesHtml = '';
+        if (matches.length > 0) {
+            const rows = matches.map((m, i) => `
+                <tr>
+                    <td class="text-center">${i + 1}</td>
+                    <td><strong>${escapeHtml(m.username || '-')}</strong></td>
+                    <td>${formatTime(m.download_time)}</td>
+                    <td class="text-secondary text-sm">${escapeHtml(m.client_ip || '-')}</td>
+                </tr>
+            `).join('');
+
+            matchesHtml = `
+                <table class="table" style="margin-top:var(--space-3)">
+                    <thead>
+                        <tr>
+                            <th style="width:50px;text-align:center">#</th>
+                            <th>下载用户</th>
+                            <th>下载时间</th>
+                            <th>客户端IP</th>
+                        </tr>
+                    </thead>
+                    <tbody>${rows}</tbody>
+                </table>
             `;
         }
+
+        // 状态徽章和标题
+        let statusBadge = '';
+        let statusTitle = '';
+        if (leakerCount > 0) {
+            statusBadge = `<span class="badge badge-danger">已匹配</span>`;
+            statusTitle = `追溯到 ${leakerCount} 位泄露者（${matches.length} 条记录）`;
+        } else if (crossProjectCount > 0) {
+            statusBadge = `<span class="badge badge-warning">跨项目命中</span>`;
+            statusTitle = `有 ${crossProjectCount} 个指纹属于其他项目`;
+        } else {
+            statusBadge = `<span class="badge badge-muted">未匹配</span>`;
+            statusTitle = '未找到泄露源';
+        }
+
+        // 跨项目提示
+        let crossProjectHint = '';
+        if (crossProjectCount > 0) {
+            crossProjectHint = `
+                <p class="text-sm text-secondary mt-3" style="padding:var(--space-3);background:var(--color-bg);border-radius:var(--radius)">
+                    另有 <strong>${crossProjectCount}</strong> 个指纹属于其他项目，无法查看其下载者信息。
+                </p>
+            `;
+        }
+
+        result.innerHTML = `
+            <div class="card">
+                <div class="card-title">
+                    ${statusBadge}
+                    &nbsp;${statusTitle}
+                </div>
+                <p class="text-sm text-secondary">
+                    取证文件：<strong>${escapeHtml(file.name)}</strong>
+                    ${totalCount > 0 ? `（共 ${totalCount} 个指纹匹配）` : ''}
+                </p>
+                ${matchesHtml}
+                ${crossProjectHint}
+                ${leakerCount > 0 ? `
+                    <button class="btn btn-primary mt-4" id="forensics-report-btn">下载取证报告（PDF）</button>
+                ` : ''}
+            </div>
+        `;
+
+        // 绑定报告下载按钮
+        const reportBtn = document.getElementById('forensics-report-btn');
+        if (reportBtn) {
+            reportBtn.addEventListener('click', () => downloadForensicsReport(pid, file));
+        }
+
     } catch (err) {
         result.innerHTML = `<div class="card" style="color:var(--color-danger)">${escapeHtml(err.message)}</div>`;
     }

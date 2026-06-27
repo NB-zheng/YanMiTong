@@ -102,7 +102,12 @@ function openModal(title, bodyHtml, opts = {}) {
             if (e.target.dataset.action === 'ok') {
                 const formData = {};
                 overlay.querySelectorAll('[name]').forEach(el => {
-                    formData[el.name] = el.value;
+                    // radio/checkbox 只取 checked 的项，避免同 name 多元素时值被覆盖
+                    if (el.type === 'radio' || el.type === 'checkbox') {
+                        if (el.checked) formData[el.name] = el.value;
+                    } else {
+                        formData[el.name] = el.value;
+                    }
                 });
                 close(formData);
             }
