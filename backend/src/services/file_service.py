@@ -15,7 +15,7 @@ import services.audit_service as audit
 # ===== 上传 =====
 def upload_file(db: Session, uploader: User, uploader_sm2_priv_hex: str,
                 project_id: int, filename: str, plain_bytes: bytes) -> FileMeta:
-    # 校验上传者是项目成员
+    # 权限：仅项目负责人 (owner) 可上传文件
     pm = db.query(ProjectMember).filter_by(
         project_id=project_id, user_id=uploader.user_id, status="active"
     ).first()
@@ -25,6 +25,12 @@ def upload_file(db: Session, uploader: User, uploader_sm2_priv_hex: str,
                         object_type="file", object_id="-",
                         detail={"reason": "not a project member"})
         raise HTTPException(403, "不是该项目成员")
+    if pm.role != "owner":
+        audit.write_log(db, project_id=project_id, user_id=uploader.user_id,
+                        operation="upload", result="denied",
+                        object_type="file", object_id="-",
+                        detail={"reason": "not project owner", "role": pm.role})
+        raise HTTPException(403, "仅项目负责人可上传文件")
 
     # 生成文件密钥 K
     k = crypto.gen_file_key()
@@ -210,6 +216,8 @@ def delete_file(db: Session, requester: User, file_id: int) -> None:
                         object_type="file", object_id=str(file_id),
                         detail={"reason": "not uploader or owner"})
         raise HTTPException(403, "仅上传者或项目负责人可以删除文件")
+    # 注：按当前权限模型，只有 owner 能上传文件，因此 is_uploader 与 is_owner 等价。
+    # 保留两分支仅为兼容历史数据与说明意图。
 
     # 收集统计信息用于审计
     auth_count = db.query(Authorization).filter_by(file_id=file_id).count()
@@ -274,6 +282,9 @@ def _apply_watermark(file_type: str, data: bytes, fingerprint: str) -> tuple[byt
         if file_type == "docx":
             from watermark.docx_marker import embed
             return embed(data, fingerprint), "docx_prop"
+        if file_type == "doc":
+            # .doc 二进制格式无法安全嵌入水印，走降级方案
+            return data + f"\n<!--YMT-FP:{fingerprint}-->\n".encode("utf-8"), "doc_trailer"
         if file_type == "image":
             from watermark.image_marker import embed
             return embed(data, fingerprint), "image_lsb"
@@ -287,71 +298,124 @@ def _apply_watermark(file_type: str, data: bytes, fingerprint: str) -> tuple[byt
 # ===== 取证 =====
 def forensics_analyze(db: Session, requester: User, leaked_bytes: bytes,
                       project_id: int) -> dict:
-    """从泄露文件中提取指纹并匹配 WatermarkRecord，必须项目内取证。
+    """从泄露文件中提取所有指纹并匹配 WatermarkRecord，必须项目内取证。
 
     安全约束：只回显本项目内文件的下载者；如果指纹属于其它项目的文件，
-    返回 cross_project=True 但不暴露任何下载者信息。
+    只返回计数，不暴露任何下载者信息。
+
+    返回：
+        matched: 是否有任何匹配
+        matches: 本项目内的匹配列表（按下载时间升序）
+        total_count: 总匹配数
+        cross_project_count: 属于其他项目的指纹数
+        message: 说明信息
     """
-    fp = _extract_fingerprint(leaked_bytes)
-    if not fp:
-        return {"matched": False, "message": "未能从该文件中提取到指纹（可能未经平台下载或水印已被破坏）"}
+    from schemas import ForensicsResp, ForensicsMatch
 
-    wr = db.query(WatermarkRecord).filter_by(fingerprint=fp).first()
-    if not wr:
-        return {"matched": False, "message": "提取到的指纹未在平台下载记录中匹配到"}
+    # 1. 提取所有指纹
+    fingerprints = _extract_all_fingerprints(leaked_bytes)
+    if not fingerprints:
+        return ForensicsResp(
+            matched=False,
+            matches=[],
+            total_count=0,
+            cross_project_count=0,
+            message="未能从该文件中提取到指纹（可能未经平台下载或水印已被破坏）",
+        ).model_dump(mode="json")
 
-    fm = db.query(FileMeta).get(wr.file_id)
-    if not fm:
-        # 文件元数据已被清掉，无法验证归属，按"无法判定"处理避免泄漏
-        return {"matched": False, "message": "对应文件已被删除，无法确认归属"}
+    # 2. 查询每个指纹的 WatermarkRecord（指纹已在 _extract_all_fingerprints 中去重）
+    matched_records = []
+    cross_project_count = 0
 
-    if fm.project_id != project_id:
-        # 该文件不属于当前项目：明确拒绝披露下载者
+    for fp in fingerprints:
+        wr = db.query(WatermarkRecord).filter_by(fingerprint=fp).first()
+        if not wr:
+            continue  # 指纹不在数据库中，跳过
+
+        fm = db.query(FileMeta).get(wr.file_id)
+        if not fm:
+            continue  # 文件元数据已被清掉
+
+        if fm.project_id != project_id:
+            # 该文件不属于当前项目，只计数不披露
+            cross_project_count += 1
+            audit.write_log(db, project_id=project_id, user_id=requester.user_id,
+                            operation="forensics", result="cross_project_hint",
+                            object_type="file", object_id=str(wr.file_id),
+                            detail={"reason": "cross_project",
+                                    "actual_project_id": fm.project_id})
+            continue
+
+        # 属于本项目，添加到匹配列表
+        user = db.query(User).get(wr.user_id)
+        matched_records.append({
+            "username": user.username if user else "(用户已删除)",
+            "download_time": wr.download_time,
+            "fingerprint": fp,
+            "client_ip": wr.client_ip,
+            "file_id": fm.file_id,
+        })
+
+    # 3. 按下载时间升序排序（同一用户多次下载都保留，按时间展示）
+    sorted_matches = sorted(matched_records, key=lambda x: x["download_time"])
+
+    # 4. 统计泄露者人数（按用户名去重）
+    unique_leakers = set(m["username"] for m in sorted_matches)
+    leaker_count = len(unique_leakers)
+
+    # 5. 记录审计日志
+    if sorted_matches:
         audit.write_log(db, project_id=project_id, user_id=requester.user_id,
-                        operation="forensics", result="denied",
-                        object_type="file", object_id=str(wr.file_id),
-                        detail={"reason": "cross_project",
-                                "actual_project_id": fm.project_id})
-        return {
-            "matched": False,
-            "cross_project": True,
-            "message": "该文件不属于当前项目，您无权查看其下载人信息",
-        }
+                        operation="forensics", result="success",
+                        object_type="file", object_id="-",
+                        detail={"total_matches": len(sorted_matches),
+                                "cross_project": cross_project_count})
 
-    user = db.query(User).get(wr.user_id)
-    audit.write_log(db, project_id=project_id, user_id=requester.user_id,
-                    operation="forensics", result="success",
-                    object_type="file", object_id=str(wr.file_id),
-                    detail={"target_user": user.username if user else None})
-    return {
-        "matched": True,
-        "username": user.username if user else "(用户已删除)",
-        "download_time": wr.download_time,
-        "message": f"定位到下载者：{user.username if user else '(用户已删除)'}",
-    }
+    # 5. 构建响应
+    matches = [ForensicsMatch(**m).model_dump(mode="json") for m in sorted_matches]
+    total_count = len(sorted_matches) + cross_project_count
+
+    if total_count == 0:
+        message = "提取到的指纹未在平台下载记录中匹配到"
+    elif cross_project_count > 0:
+        message = f"共定位到 {leaker_count} 位泄露者（{total_count} 条匹配记录），另有 {cross_project_count} 个指纹属于其他项目"
+    else:
+        message = f"共定位到 {leaker_count} 位泄露者（{total_count} 条匹配记录）"
+
+    return ForensicsResp(
+        matched=len(sorted_matches) > 0,
+        matches=matches,
+        total_count=total_count,
+        leaker_count=leaker_count,
+        cross_project_count=cross_project_count,
+        message=message,
+    ).model_dump(mode="json")
 
 
 # ===== 指纹提取：分格式实现 =====
-def _extract_fingerprint(data: bytes) -> Optional[str]:
-    """按优先级尝试多种提取方式，首个命中即返回。
-
-    1. 显式的文本 trailer（任何文本/二进制文件的兜底标记）
-    2. PDF 元数据（PyMuPDF）
-    3. DOCX 文档属性（python-docx）
-    4. 图像 LSB（Pillow）
-    """
+def _extract_all_fingerprints(data: bytes) -> list[str]:
+    """提取文件中所有指纹，返回去重后的指纹列表（按出现顺序）。"""
     import re
+    fingerprints = set()
+
     # 1. trailer / 显式标记（兼容历史 trailer_tag）
     for pat in (rb"YMT-FP:([0-9a-f]{64})", rb"YMTFingerprint\(([0-9a-f]{64})\)"):
-        m = re.search(pat, data)
-        if m:
-            return m.group(1).decode("ascii")
+        for m in re.finditer(pat, data):  # finditer 找所有匹配
+            fingerprints.add(m.group(1).decode("ascii"))
+
     # 2/3/4 顺序尝试，失败静默
     for extractor in (_extract_from_pdf, _extract_from_docx, _extract_from_image_lsb):
         fp = extractor(data)
         if fp:
-            return fp
-    return None
+            fingerprints.add(fp)
+
+    return list(fingerprints)
+
+
+def _extract_fingerprint(data: bytes) -> Optional[str]:
+    """兼容旧接口：返回第一个指纹。"""
+    fps = _extract_all_fingerprints(data)
+    return fps[0] if fps else None
 
 
 def _extract_from_pdf(data: bytes) -> Optional[str]:

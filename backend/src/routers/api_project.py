@@ -39,7 +39,7 @@ def create_project(req: schemas.ProjectCreateReq,
                             operation="create_project", result="success",
                             object_type="project", object_id=str(p.project_id),
                             detail={"name": p.project_name})
-    return project_out(db, p)
+    return project_out(db, p, viewer_id=me.user_id)
 
 
 @router.get("", response_model=list[schemas.ProjectOut])
@@ -54,11 +54,11 @@ def list_my_projects(me: User = Depends(auth_service.current_user),
 
 @router.get("/{project_id}", response_model=schemas.ProjectOut)
 def get_project(project_id: int, db: Session = Depends(get_db),
-                _me: User = Depends(auth_service.current_user)):
+                me: User = Depends(auth_service.current_user)):
     p = db.query(Project).get(project_id)
     if not p:
         raise HTTPException(404, "项目不存在")
-    return project_out(db, p)
+    return project_out(db, p, viewer_id=me.user_id)
 
 
 @router.put("/{project_id}", response_model=schemas.ProjectOut,
@@ -87,7 +87,7 @@ def update_project(project_id: int, req: schemas.ProjectUpdateReq,
                                 operation="update_project", result="success",
                                 object_type="project", object_id=str(p.project_id),
                                 detail=changes)
-    return project_out(db, p)
+    return project_out(db, p, viewer_id=me.user_id)
 
 
 @router.delete("/{project_id}", response_model=schemas.OkResp,
@@ -163,6 +163,13 @@ def add_member(project_id: int, req: schemas.AddMemberReq,
     existing = db.query(ProjectMember).filter_by(
         project_id=project_id, user_id=target.user_id).first()
     if existing:
+        # 唯一 owner 不可被改角色（避免项目变成无 owner）
+        if existing.role == "owner" and existing.user_id != me.user_id:
+            raise HTTPException(400, "项目唯一负责人的角色不可被修改")
+        if existing.role == "owner" and req.role != "owner":
+            raise HTTPException(400, "不能修改项目负责人的角色")
+        # 通过 add_member 修改 role 的，必须是 owner 本人（避免他人降级自己）
+        # （前面已校验 p.owner_id == me.user_id，因此此条件自动满足）
         existing.role = req.role
         existing.status = "active"
         db.commit()
@@ -270,9 +277,7 @@ async def forensics_report(project_id: int,
     from services import report_service
     data = await file.read()
     result = file_service.forensics_analyze(db, me, data, project_id)
-    if result.get("download_time"):
-        from tools import bj_str
-        result["download_time"] = bj_str(result["download_time"])
+    # result 中的 download_time 已经是字符串（model_dump 自动序列化），无需转换
     src_name = file.filename or ""
     body, ctype = report_service.render_forensics_pdf(result, filename=src_name)
     suffix = "pdf" if ctype == "application/pdf" else "txt"

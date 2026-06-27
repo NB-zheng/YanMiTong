@@ -1,4 +1,4 @@
-"""授权 / 撤销 / 我的授权列表。"""
+"""授权 / 撤销（强/弱） / 恢复 / 我的授权列表。"""
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -26,12 +26,25 @@ def grant(req: schemas.GrantReq,
     return authz_out(db, a)
 
 
-@router.post("/revoke", response_model=schemas.AuthorizationOut)
+@router.post("/revoke", response_model=schemas.AuthorizationOut,
+             summary="撤销授权：mode=strong 重加密重封装 / mode=weak 仅标记可恢复")
 def revoke(req: schemas.RevokeReq,
            sess: dict = Depends(auth_service.current_session),
            db: Session = Depends(get_db)):
     me = db.query(User).get(sess["user_id"])
-    a = authz_service.revoke(db, me, sess["sm2_private_key_hex"], req.auth_id)
+    a = authz_service.revoke(
+        db, me, sess["sm2_private_key_hex"], req.auth_id, mode=req.mode,
+    )
+    return authz_out(db, a)
+
+
+@router.post("/restore", response_model=schemas.AuthorizationOut,
+             summary="恢复弱撤销的授权（强撤销不可恢复）")
+def restore(req: schemas.RestoreReq,
+            sess: dict = Depends(auth_service.current_session),
+            db: Session = Depends(get_db)):
+    me = db.query(User).get(sess["user_id"])
+    a = authz_service.restore(db, me, req.auth_id)
     return authz_out(db, a)
 
 

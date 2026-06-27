@@ -66,11 +66,16 @@ class ProjectOut(BaseModel):
     owner_username: str
     description: Optional[str] = None
     created_time: datetime.datetime
+    # 当前访问者在本项目中的角色：owner / member / auditor / None（非成员）
+    # 仅详情端点计算；列表端点恒为 None
+    viewer_role: Optional[str] = None
 
 
 class AddMemberReq(BaseModel):
     username: str
-    role: str = Field(pattern="^(owner|member|partner|auditor)$")
+    # role 取值固定三个：owner / member / auditor。
+    # owner 不允许通过 add_member 指定（项目唯一 owner 由创建者担任；转让功能本次未提供）。
+    role: str = Field(pattern="^(member|auditor)$")
 
 
 class ProjectMemberOut(BaseModel):
@@ -108,6 +113,15 @@ class GrantReq(BaseModel):
 
 class RevokeReq(BaseModel):
     auth_id: int
+    # mode:
+    # - strong: 强撤销 —— 重生成 K'，重加密文件，重新封装剩余授权（默认）
+    # - weak:   弱撤销 —— 仅标记 status=revoked，不重加密（适合临时协作到期）
+    mode: str = Field(default="strong", pattern="^(strong|weak)$")
+
+
+class RestoreReq(BaseModel):
+    """恢复由弱撤销标记的授权（仅 owner 可调用）。"""
+    auth_id: int
 
 
 class AuthorizationOut(BaseModel):
@@ -123,6 +137,8 @@ class AuthorizationOut(BaseModel):
     file_version: int
     created_time: datetime.datetime
     revoked_time: Optional[datetime.datetime] = None
+    # 撤销模式：NULL=未撤销 / "weak"=弱撤销（可恢复）/ "strong"=强撤销（不可恢复）
+    revoke_mode: Optional[str] = None
 
 
 # ===== Audit =====
@@ -145,11 +161,21 @@ class ChainVerifyResp(BaseModel):
 
 
 # ===== Forensics =====
+class ForensicsMatch(BaseModel):
+    """单个指纹匹配结果"""
+    username: str                      # 下载者用户名
+    download_time: datetime.datetime   # 下载时间
+    fingerprint: str                   # 指纹（64位hex，用于关联审计）
+    client_ip: Optional[str] = None   # 下载时客户端IP
+    file_id: int                      # 对应的文件ID
+
+
 class ForensicsResp(BaseModel):
-    matched: bool                                       # 命中且属于本项目
-    cross_project: bool = False                         # 命中但属于其它项目（无权查看）
-    username: Optional[str] = None                      # 仅在 matched=true 时返回
-    download_time: Optional[datetime.datetime] = None   # 仅在 matched=true 时返回
+    matched: bool                                       # 是否有任何匹配
+    matches: List[ForensicsMatch] = []                 # 所有匹配结果（按下载时间升序）
+    total_count: int = 0                               # 匹配记录总数（包含同一人多次下载）
+    leaker_count: int = 0                             # 泄露者人数（按用户去重）
+    cross_project_count: int = 0                       # 属于其他项目的指纹数（无权查看）
     message: str
 
 

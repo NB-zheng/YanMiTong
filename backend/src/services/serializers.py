@@ -25,7 +25,19 @@ def _name(m: dict[int, str], uid: int | None) -> str | None:
     return m.get(uid) or f"#{uid}"  # 兜底：用户已删但日志仍在
 
 
-def project_out(db: Session, p: Project) -> schemas.ProjectOut:
+def _viewer_role(db: Session, project_id: int, viewer_id: int | None) -> str | None:
+    """查当前 viewer 在该项目中的 active role；非成员 / 未传 viewer_id 返回 None。"""
+    if viewer_id is None:
+        return None
+    pm = (
+        db.query(ProjectMember)
+        .filter_by(project_id=project_id, user_id=viewer_id, status="active")
+        .first()
+    )
+    return pm.role if pm else None
+
+
+def project_out(db: Session, p: Project, viewer_id: int | None = None) -> schemas.ProjectOut:
     m = username_map(db, [p.owner_id])
     return schemas.ProjectOut(
         project_id=p.project_id,
@@ -33,6 +45,7 @@ def project_out(db: Session, p: Project) -> schemas.ProjectOut:
         owner_username=_name(m, p.owner_id),
         description=p.description,
         created_time=p.created_time,
+        viewer_role=_viewer_role(db, p.project_id, viewer_id),
     )
 
 
@@ -45,6 +58,7 @@ def projects_out(db: Session, ps: list[Project]) -> list[schemas.ProjectOut]:
             owner_username=_name(m, p.owner_id),
             description=p.description,
             created_time=p.created_time,
+            viewer_role=None,  # 列表端点不计算 viewer_role
         ) for p in ps
     ]
 
@@ -116,6 +130,7 @@ def authz_out(db: Session, a: Authorization) -> schemas.AuthorizationOut:
         file_version=a.file_version,
         created_time=a.created_time,
         revoked_time=a.revoked_time,
+        revoke_mode=a.revoke_mode,
     )
 
 
@@ -136,6 +151,7 @@ def authzs_out(db: Session, auths: list[Authorization]) -> list[schemas.Authoriz
             file_version=a.file_version,
             created_time=a.created_time,
             revoked_time=a.revoked_time,
+            revoke_mode=a.revoke_mode,
         ) for a in auths
     ]
 

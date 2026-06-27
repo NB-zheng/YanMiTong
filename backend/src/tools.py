@@ -34,7 +34,8 @@ def gen_token(nbytes: int = 24) -> str:
 _EXT_TYPE_MAP = {
     # 文档
     "pdf":      "pdf",
-    "docx":     "docx", "doc":      "docx",
+    "docx":     "docx",
+    "doc":      "doc",
     # 图像
     "png":      "image", "jpg":      "image", "jpeg":     "image",
     "bmp":      "image", "gif":      "image", "webp":     "image",

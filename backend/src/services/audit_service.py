@@ -107,8 +107,9 @@ def raise_alert(db: Session, *, project_id: int, user_id: Optional[int], alert_t
 
 
 # ===== 权限 =====
-# 仅审计员可访问审计链与取证；owner 也无权（职责分离，防止 owner 自己掩盖痕迹）
-AUDIT_ROLES = ("auditor",)
+# 审计权限：项目负责人 (owner) 与审计员 (auditor) 都可访问审计链、告警与取证。
+# owner 同时享有项目所有业务权限，按产品设计需要能看到自己项目的审计全貌。
+AUDIT_ROLES = ("auditor", "owner")
 
 
 def can_audit(db: Session, user_id: int, project_id: int) -> bool:
@@ -122,4 +123,4 @@ def can_audit(db: Session, user_id: int, project_id: int) -> bool:
 
 def assert_can_audit(db: Session, user_id: int, project_id: int) -> None:
     if not can_audit(db, user_id, project_id):
-        raise HTTPException(403, "无权访问审计与取证（仅项目审计员可用）")
+        raise HTTPException(403, "无权访问审计与取证（仅项目审计员或负责人可用）")

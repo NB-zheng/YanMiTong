@@ -50,7 +50,10 @@ class ProjectMember(Base):
 
     project_id = sa.Column(sa.Integer, sa.ForeignKey("project.project_id"), primary_key=True)
     user_id = sa.Column(sa.Integer, sa.ForeignKey("user.user_id"), primary_key=True)
-    # owner / member / partner / auditor
+    # owner / member / auditor
+    # - owner:   项目唯一负责人，拥有项目一切权利（含审计/取证）
+    # - member:  只能下载被授权的文件
+    # - auditor: 只能查看审计/告警/取证，可下载被授权的文件，不可上传
     role = sa.Column(sa.String(20), nullable=False)
     # active / removed
     status = sa.Column(sa.String(20), default="active", nullable=False)
@@ -103,6 +106,8 @@ class Authorization(Base):
     status = sa.Column(sa.String(20), default="valid", nullable=False)
     created_time = sa.Column(sa.DateTime, default=now_bj, nullable=False)
     revoked_time = sa.Column(sa.DateTime)
+    # 撤销模式：NULL=未撤销；"weak"=弱撤销（仅标记，可恢复）；"strong"=强撤销（重加密，不可恢复）
+    revoke_mode = sa.Column(sa.String(10), nullable=True)
 
 
 class WatermarkRecord(Base):
