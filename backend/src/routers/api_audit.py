@@ -48,6 +48,28 @@ def verify_chain(project_id: int = Query(...),
                  db: Session = Depends(get_db)):
     audit_service.assert_can_audit(db, me.user_id, project_id)
     ok, broken, total = audit_service.verify_chain(db, project_id)
+
+    # 检测到断链：自动写一条告警（用 related_log_id 避免对同一断点重复告警）
+    if not ok and broken > 0:
+        already = (
+            db.query(Alert)
+            .filter(Alert.project_id == project_id,
+                    Alert.alert_type == "audit_log_tamper",
+                    Alert.related_log_id == broken,
+                    Alert.handled == False)  # noqa: E712
+            .first()
+        )
+        if not already:
+            audit_service.raise_alert(
+                db,
+                project_id=project_id,
+                user_id=None,
+                alert_type="audit_log_tamper",
+                message=f"项目 {project_id} 审计哈希链在 log_id={broken} 处断裂，疑似日志被篡改",
+                severity="high",
+                related_log_id=broken,
+            )
+
     return schemas.ChainVerifyResp(ok=ok, broken_at_log_id=broken, total=total)
 
 

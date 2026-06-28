@@ -132,10 +132,45 @@ def download_file(db: Session, requester: User, requester_sm2_priv_hex: str,
         raise HTTPException(403, "下载次数已用完")
 
     # 解出文件密钥 K
-    k = crypto.sm2_decrypt_key(requester_sm2_priv_hex, auth.encrypted_file_key)
+    try:
+        k = crypto.sm2_decrypt_key(requester_sm2_priv_hex, auth.encrypted_file_key)
+    except Exception as e:
+        audit.write_log(db, project_id=fm.project_id, user_id=requester.user_id,
+                        operation="download", result="failed",
+                        object_type="file", object_id=str(file_id),
+                        detail={"reason": "sm2 decapsulate failed",
+                                "error": str(e)[:200]})
+        audit.raise_alert(db, project_id=fm.project_id, user_id=requester.user_id,
+                          alert_type="tamper_suspect",
+                          message=f"file_id={file_id} 密钥封装数据异常（授权记录可能被篡改）",
+                          severity="high")
+        raise HTTPException(500, "授权数据异常，请联系项目负责人")
 
-    # SM4 解密文件
-    plain = crypto.sm4_decrypt_bytes(k, open(fm.cipher_path, "rb").read())
+    # SM4 解密文件（密文损坏/被篡改会在此抛 ValueError）
+    try:
+        plain = crypto.sm4_decrypt_bytes(k, open(fm.cipher_path, "rb").read())
+    except FileNotFoundError:
+        audit.write_log(db, project_id=fm.project_id, user_id=requester.user_id,
+                        operation="download", result="failed",
+                        object_type="file", object_id=str(file_id),
+                        detail={"reason": "cipher file missing",
+                                "cipher_path": fm.cipher_path})
+        audit.raise_alert(db, project_id=fm.project_id, user_id=requester.user_id,
+                          alert_type="cipher_missing",
+                          message=f"file_id={file_id} 密文文件丢失",
+                          severity="high")
+        raise HTTPException(500, "密文文件丢失，请联系项目负责人")
+    except (ValueError, Exception) as e:
+        audit.write_log(db, project_id=fm.project_id, user_id=requester.user_id,
+                        operation="download", result="failed",
+                        object_type="file", object_id=str(file_id),
+                        detail={"reason": "sm4 decrypt failed (cipher tampered or corrupted)",
+                                "error": str(e)[:200]})
+        audit.raise_alert(db, project_id=fm.project_id, user_id=requester.user_id,
+                          alert_type="cipher_tampered",
+                          message=f"file_id={file_id} 密文异常（文件可能被篡改或损坏）",
+                          severity="high")
+        raise HTTPException(500, "文件密文异常，可能已被篡改或损坏，请联系项目负责人")
 
     # SM3 完整性校验
     sm3_now = crypto.sm3_hash(plain)
