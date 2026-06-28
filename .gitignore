@@ -23,7 +23,7 @@ env/
 *.log
 logs/
 
-# Data / 本地数据库文件（按需调整）
+# Data / 本地数据库文件
 backend/data/
 
 # 临时脚本
@@ -32,4 +32,6 @@ a
 前端开发指南.md
 研密通项目报告.md
 研密通项目团队任务分工表.md
-研密通报告.docx
+安全测试.md
+*.docx
+*.doc
